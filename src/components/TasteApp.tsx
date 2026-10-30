@@ -23,6 +23,7 @@ export default function TasteApp() {
   const [imports, setImports] = useState<{ domain: Domain; source: string; items: string[]; name: string }[]>([]);
   const [want, setWant] = useState<Domain[]>(["music", "film", "book"]);
   const [depth, setDepth] = useState<"balanced" | "digger">("digger");
+  const [from, setFrom] = useState<Domain | "all">("all");
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export default function TasteApp() {
       const res = await fetch("/api/recommend", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...lists, want, depth, note: note || undefined }),
+        body: JSON.stringify({ ...lists, want, depth, from, note: note || undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `Ошибка ${res.status}`);
@@ -86,11 +87,12 @@ export default function TasteApp() {
       <header className="mb-10">
         <div className="text-xs uppercase tracking-[0.2em] text-accent">TasteDigger · MVP</div>
         <h1 className="mt-2 font-serif text-4xl leading-tight sm:text-5xl">
-          Что копать дальше, <span className="text-muted">если вы любите вот это</span>
+          Если бы эта музыка была фильмом, <span className="text-muted">то каким?</span>
         </h1>
         <p className="mt-4 max-w-2xl text-[15px] leading-relaxed text-muted">
-          Укажите музыку, кино и книги, которые вас цепляют. Сервис соберёт портрет вкуса и предложит находки с объяснением связей: лейблы,
-          продюсеры, сцены, эпохи, настроения. Каждая рекомендация проверяется по открытым каталогам.
+          Укажите музыку, кино и книги, которые вас цепляют. Сервис переведёт вкус из одного домена в другой и покажет мост к каждой находке:
+          от каких именно ваших позиций она построена и что переносится — текстура, темп, эпоха, настроение. Внутри домена копает глубже:
+          лейблы, продюсеры, сцены. Каждая рекомендация проверяется по открытым каталогам.
         </p>
       </header>
 
@@ -139,6 +141,35 @@ export default function TasteApp() {
         </div>
 
         <aside className="flex flex-col gap-4 rounded-2xl border border-line bg-panel p-5">
+          <fieldset>
+            <legend className="text-xs uppercase tracking-wide text-muted">Отталкиваться от</legend>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {[{ key: "all" as const, label: "Всего списка" }, ...DOMAINS.map((d) => ({ key: d.key, label: d.label }))].map((o) => {
+                const on = from === o.key;
+                const disabled = o.key !== "all" && lists[o.key].length === 0;
+                return (
+                  <button
+                    key={o.key}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setFrom(o.key)}
+                    className={`rounded-lg border px-3 py-1.5 text-sm disabled:opacity-30 ${on ? "border-accent-2 bg-accent-2/15 text-accent-2" : "border-line text-muted hover:text-fg"}`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-muted">
+              {from === "all"
+                ? "Профиль строится по всему, мосты между доменами — от конкретных позиций."
+                : `Вопрос: «если бы ${from === "music" ? "эта музыка была" : from === "film" ? "это кино было" : "эти книги были"} ${want
+                    .filter((w) => w !== from)
+                    .map((w) => (w === "film" ? "фильмом" : w === "book" ? "книгой" : "музыкой"))
+                    .join(" или ") || "…"}, то чем?»`}
+            </p>
+          </fieldset>
+
           <fieldset>
             <legend className="text-xs uppercase tracking-wide text-muted">Что рекомендовать</legend>
             <div className="mt-2 flex flex-wrap gap-2">

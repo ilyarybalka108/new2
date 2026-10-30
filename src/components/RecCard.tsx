@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { GroundedRecommendation } from "@/lib/types";
 
 const DOMAIN_LABEL: Record<GroundedRecommendation["domain"], string> = { music: "Музыка", film: "Кино", book: "Книга" };
+const AS_DOMAIN: Record<GroundedRecommendation["domain"], string> = { music: "музыкой", film: "фильмом", book: "книгой" };
 const DEPTH_LABEL: Record<GroundedRecommendation["depth"], string> = { entry: "вход", deep: "глубже", obscure: "редкость" };
 const CONNECTION_LABEL: Record<GroundedRecommendation["connections"][number]["type"], string> = {
   label: "лейбл",
@@ -69,6 +70,22 @@ export default function RecCard({ rec, index }: { rec: GroundedRecommendation; i
         </div>
         <span className="font-mono text-xs text-muted">#{index + 1}</span>
       </header>
+
+      {rec.bridge ? (
+        <div className="rounded-xl border border-accent-2/30 bg-accent-2/10 p-3">
+          <div className="text-[11px] uppercase tracking-wide text-accent-2">
+            Если бы это было {AS_DOMAIN[rec.domain]} →
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {rec.bridge.from_items.map((it) => (
+              <span key={it} className="rounded-md bg-bg/60 px-2 py-0.5 text-xs text-fg">
+                {it}
+              </span>
+            ))}
+          </div>
+          <p className="mt-2 text-sm leading-relaxed text-fg/90">{rec.bridge.analogy}</p>
+        </div>
+      ) : null}
 
       <p className="text-[15px] leading-relaxed text-fg/90">{rec.why}</p>
 

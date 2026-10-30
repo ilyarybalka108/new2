@@ -13,6 +13,7 @@ const Body = z.object({
   book: z.array(z.string()).max(200).default([]),
   want: z.array(Domain).min(1),
   depth: z.enum(["balanced", "digger"]).default("balanced"),
+  from: z.union([Domain, z.literal("all")]).default("all"),
   note: z.string().max(500).optional(),
   verify: z.boolean().default(true),
 });

@@ -1,10 +1,28 @@
 import type { ApiResult } from "@/lib/types";
 
+const DOMAIN_RU: Record<string, string> = { music: "музыка", film: "кино", book: "книги" };
+
 export default function ProfileView({ profile }: { profile: ApiResult["profile"] }) {
   return (
     <section className="rounded-2xl border border-line bg-panel p-6">
       <h2 className="font-serif text-2xl">Портрет вкуса</h2>
       <p className="mt-3 text-[15px] leading-relaxed text-fg/90">{profile.summary}</p>
+
+      {profile.translations?.length ? (
+        <div className="mt-6">
+          <h3 className="text-xs uppercase tracking-wide text-muted">Карта переводов вкуса</h3>
+          <ul className="mt-2 grid gap-3 md:grid-cols-2">
+            {profile.translations.map((t) => (
+              <li key={`${t.from}-${t.to}`} className="rounded-xl border border-accent-2/30 bg-accent-2/10 p-4">
+                <div className="text-sm font-medium text-accent-2">
+                  {DOMAIN_RU[t.from]} <span className="text-muted">→</span> {DOMAIN_RU[t.to]}
+                </div>
+                <p className="mt-1.5 text-sm leading-relaxed text-fg/90">{t.statement}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 md:grid-cols-2">
         <div>
