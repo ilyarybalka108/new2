@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Моды Claude Code: свой рантайм и свои типы, проверяются `claude plugin validate`.
+    "mods/**",
   ]),
 ]);
 

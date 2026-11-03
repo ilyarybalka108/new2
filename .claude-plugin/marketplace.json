@@ -1,0 +1,13 @@
+{
+  "name": "new2-mods",
+  "owner": {
+    "name": "ilyarybalka108"
+  },
+  "description": "Моды Claude Code из репозитория TasteDigger: панели, хуки и команды для работы над проектом.",
+  "plugins": [
+    {
+      "name": "project-health",
+      "source": "./mods/project-health"
+    }
+  ]
+}

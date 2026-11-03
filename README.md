@@ -69,3 +69,17 @@ npm run dev                  # http://localhost:3000
 2. Сохранять профиль и историю оценок (SQLite или Postgres), чтобы не советовать повторно.
 3. Платный «глубокий режим» (ЮKassa / CloudPayments), лимит бесплатных запросов.
 4. Расширить проверку: Discogs API для лейблов и credits, Кинопоиск через неофициальный API.
+
+## Моды Claude Code
+
+В `mods/` лежат расширения самого Claude Code, а репозиторий служит для них маркетплейсом (`.claude-plugin/marketplace.json`).
+
+| Мод | Что делает |
+|---|---|
+| [`project-health`](mods/project-health/README.md) | Боковая панель «Здоровье проекта»: после правок кода сама запускает typecheck, lint и тесты, показывает результат в панели и статус-строке; `/health` запускает вручную |
+
+Установка в терминальной сессии Claude Code:
+
+```
+/plugin install project-health --marketplace ilyarybalka108/new2
+```
