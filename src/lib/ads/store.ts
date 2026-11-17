@@ -1,17 +1,21 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AccountSettings, ActionLogEntry } from "./types.ts";
+import type { AccountSettings, ActionLogEntry, AdTest, DailyReport } from "./types.ts";
 
-// Состояние, которое должно переживать перезапуск: настройки кабинетов и журнал действий.
-// Один JSON-файл — достаточно для одного пользователя и не требует базы данных.
+// Состояние, которое должно переживать перезапуск: настройки кабинетов, журнал изменений,
+// отчёты ежедневных обходов и тесты объявлений. Один JSON-файл — достаточно для одного
+// пользователя и не требует базы данных.
 
-interface State {
+export interface State {
   settings: Record<string, AccountSettings>;
   log: ActionLogEntry[];
+  reports: DailyReport[];
+  tests: AdTest[];
 }
 
-const MAX_LOG = 500;
-const empty = (): State => ({ settings: {}, log: [] });
+const MAX_LOG = 2000;
+const MAX_REPORTS = 90;
+const empty = (): State => ({ settings: {}, log: [], reports: [], tests: [] });
 
 interface Slot {
   dir: string | null;
@@ -29,13 +33,14 @@ function slot(dir: string | null): Slot {
   return store.__adsStore;
 }
 
-async function load(dir: string | null): Promise<State> {
+/** Текущее состояние. Возвращаемый объект менять нельзя — для этого есть `mutate`. */
+export async function read(dir: string | null): Promise<State> {
   const s = slot(dir);
   if (s.state) return s.state;
   if (dir === null) return (s.state = empty());
   try {
     const parsed = JSON.parse(await readFile(path.join(dir, "cabinet.json"), "utf8")) as Partial<State>;
-    s.state = { settings: parsed.settings ?? {}, log: parsed.log ?? [] };
+    s.state = { ...empty(), ...parsed };
   } catch (e) {
     // Файла ещё нет — начинаем с пустого состояния. Повреждённый файл молча не затираем.
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`Не удалось прочитать файл состояния: ${(e as Error).message}`);
@@ -44,9 +49,14 @@ async function load(dir: string | null): Promise<State> {
   return s.state;
 }
 
-function save(dir: string | null): Promise<void> {
+/** Меняет состояние и сохраняет его на диск. */
+export async function mutate(dir: string | null, change: (state: State) => void): Promise<void> {
+  const state = await read(dir);
+  change(state);
+  state.log.length = Math.min(state.log.length, MAX_LOG);
+  state.reports.length = Math.min(state.reports.length, MAX_REPORTS);
   const s = slot(dir);
-  if (dir === null) return Promise.resolve();
+  if (dir === null) return;
   s.writing = s.writing
     .catch(() => {})
     .then(async () => {
@@ -60,24 +70,23 @@ function save(dir: string | null): Promise<void> {
 }
 
 export async function getSettings(dir: string | null, accountId: string): Promise<AccountSettings> {
-  return (await load(dir)).settings[accountId] ?? {};
+  return (await read(dir)).settings[accountId] ?? {};
 }
 
-export async function saveSettings(dir: string | null, accountId: string, settings: AccountSettings): Promise<void> {
-  const state = await load(dir);
-  state.settings[accountId] = settings;
-  await save(dir);
+export function saveSettings(dir: string | null, accountId: string, settings: AccountSettings): Promise<void> {
+  return mutate(dir, (state) => {
+    state.settings[accountId] = settings;
+  });
 }
 
-export async function appendLog(dir: string | null, entry: ActionLogEntry): Promise<void> {
-  const state = await load(dir);
-  state.log.unshift(entry);
-  state.log.length = Math.min(state.log.length, MAX_LOG);
-  await save(dir);
+export function appendLog(dir: string | null, entry: ActionLogEntry): Promise<void> {
+  return mutate(dir, (state) => {
+    state.log.unshift(entry);
+  });
 }
 
-export async function readLog(dir: string | null, limit = 20): Promise<ActionLogEntry[]> {
-  return (await load(dir)).log.slice(0, limit);
+export async function readLog(dir: string | null, limit = 30): Promise<ActionLogEntry[]> {
+  return (await read(dir)).log.slice(0, limit);
 }
 
 /** Сбрасывает состояние в памяти — для тестов. */

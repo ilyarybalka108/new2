@@ -283,6 +283,8 @@ interface DemoState {
   negatives: Map<string, string[]>;
   excluded: Map<string, string[]>;
   created: Map<string, DemoCampaign[]>;
+  /** Объявления, добавленные в группы в демо-режиме: ключ — идентификатор группы. */
+  extraAds: Map<string, { title: string; text: string }[]>;
   seq: number;
 }
 
@@ -293,6 +295,7 @@ const freshState = (): DemoState => ({
   negatives: new Map(),
   excluded: new Map(),
   created: new Map(),
+  extraAds: new Map(),
   seq: 900,
 });
 
@@ -351,12 +354,19 @@ export function createDemoProvider(accountId: string, today: string = todayMosco
     if (level === "ads") {
       const totals = groupTotals(c, total);
       return c.groups.flatMap((g, i) => {
-        const ads = g.ads ?? [
+        const own = g.ads ?? [
           { title: g.name, text: AD_TEXT[accountId] ?? "" },
           { title: `${g.name} — выгодно`, text: AD_TEXT[accountId] ?? "" },
         ];
+        const ads = [...own, ...(state.extraAds.get(`${c.id}g${i}`) ?? [])];
         // В первой группе второе объявление заметно слабее по CTR — случай для правила.
-        const parts = ads.map((_, j) => ({ weight: j === 0 ? 0.55 : 0.45, ctr: j === 1 && i === 0 ? 0.4 : 1, cpc: 1, cr: 1 }));
+        // Добавленные позже объявления (тестовые варианты) в демо заметно сильнее остальных.
+        const parts = ads.map((_, j) => ({
+          weight: j === 0 ? 0.55 : 0.45,
+          ctr: j >= own.length ? 1.5 : j === 1 && i === 0 ? 0.4 : 1,
+          cpc: 1,
+          cr: 1,
+        }));
         const split = distribute(totals[i], parts);
         return ads.map((ad, j) => {
           const key = `${c.id}g${i}a${j}`;
@@ -549,6 +559,18 @@ export function createDemoProvider(accountId: string, today: string = todayMosco
         ],
         adIds,
       };
+    },
+
+    async addAds(groupId, ads) {
+      const campaign = campaigns().find((c) => groupId.startsWith(`${c.id}g`));
+      const index = campaign ? Number(groupId.slice(campaign.id.length + 1)) : NaN;
+      const group = campaign?.groups[index];
+      if (!group) throw new Error(`Группа ${groupId} не найдена`);
+      const state = demo();
+      const extra = state.extraAds.get(groupId) ?? [];
+      const offset = (group.ads?.length ?? 2) + extra.length;
+      state.extraAds.set(groupId, [...extra, ...ads.map((ad) => ({ title: ad.title, text: ad.text }))]);
+      return ads.map((_, j) => `${groupId}a${offset + j}`);
     },
 
     async sendToModeration() {

@@ -10,6 +10,11 @@ export async function proxy(request: NextRequest) {
   const cookie = request.cookies.get(SESSION_COOKIE)?.value ?? "";
   if (safeEqual(cookie, await sessionToken(password))) return NextResponse.next();
 
+  // Доступ к API без браузера (запуск обхода по расписанию, сессия Claude) — по отдельному ключу.
+  const apiKey = process.env.ADS_API_KEY;
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  if (apiKey && request.nextUrl.pathname.startsWith("/api/") && safeEqual(bearer, apiKey)) return NextResponse.next();
+
   if (request.nextUrl.pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Требуется вход" }, { status: 401 });
   }

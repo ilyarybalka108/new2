@@ -8,6 +8,22 @@ const Body = z.object({
     targetCpa: z.number().positive().max(100_000_000).optional(),
     goals: z.array(z.string().regex(/^\d+$/)).max(10).optional(),
     attribution: z.enum(["AUTO", "LC", "LSCCD", "FCCD"]).optional(),
+    monthlyBudget: z.number().positive().max(1_000_000_000).optional(),
+    autopilot: z
+      .object({
+        enabled: z.boolean(),
+        allow: z.object({
+          negatives: z.boolean(),
+          placements: z.boolean(),
+          pauseKeywords: z.boolean(),
+          pauseAds: z.boolean(),
+          bids: z.boolean(),
+          budgets: z.boolean(),
+          pauseCampaigns: z.boolean(),
+        }),
+        maxActionsPerDay: z.number().int().min(1).max(500),
+      })
+      .optional(),
   }),
 });
 

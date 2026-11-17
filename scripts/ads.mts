@@ -9,9 +9,15 @@
 //   npm run ads -- settings <кабинет> '{"targetCpa":1500,"goals":["123"]}'
 //   npm run ads -- create plan.json
 //   npm run ads -- moderate <кабинет> "<название кампании>" <id объявлений через запятую>
+//   npm run ads -- daily [--dry-run]        ежедневный обход: изменения в рамках разрешений и отчёт
+//   npm run ads -- history                  журнал изменений с причинами и итогами
+//   npm run ads -- tests                    тесты объявлений
+//   npm run ads -- test-ad '{"accountId":"…","campaignId":"…","groupId":"…","controlAdId":"…","hypothesis":"…","ad":{…}}'
 
 import { readFile } from "node:fs/promises";
+import { changeHistory, runDaily, startAdTest, type StartTestInput } from "../src/lib/ads/autopilot.ts";
 import { validatePlan } from "../src/lib/ads/plan.ts";
+import { read } from "../src/lib/ads/store.ts";
 import {
   applyAction,
   BREAKDOWN_LEVELS,
@@ -26,7 +32,9 @@ import {
 import type { ActionRequest, BreakdownLevel, CampaignPlan, Insight } from "../src/lib/ads/types.ts";
 
 const [command, ...rest] = process.argv.slice(2);
-const args = rest.filter((a) => !a.startsWith("--"));
+const VALUE_FLAGS = ["--days", "--levels", "--reason"];
+// Позиционные аргументы — всё, кроме флагов и их значений.
+const args = rest.filter((a, i) => !a.startsWith("--") && !VALUE_FLAGS.includes(rest[i - 1]));
 const flag = (name: string): string | undefined => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? rest[i + 1] : undefined;
@@ -77,7 +85,13 @@ async function main() {
     }
 
     case "apply":
-      return print(await applyAction(JSON.parse(need(args[0], "действие в формате JSON")) as ActionRequest, config));
+      // Изменение из командной строки делает агент; причину он передаёт флагом --reason.
+      return print(
+        await applyAction(JSON.parse(need(args[0], "действие в формате JSON")) as ActionRequest, config, {
+          actor: "agent",
+          reason: flag("reason"),
+        }),
+      );
 
     case "settings":
       return print(await updateSettings(need(args[0], "кабинет"), JSON.parse(need(args[1], "настройки в формате JSON")), config));
@@ -92,8 +106,20 @@ async function main() {
     case "moderate":
       return print(await sendToModeration(need(args[0], "кабинет"), need(args[1], "название кампании"), need(args[2], "объявления").split(","), config));
 
+    case "daily":
+      return print(await runDaily(config, undefined, { dryRun: rest.includes("--dry-run") }));
+
+    case "history":
+      return print(await changeHistory(config));
+
+    case "tests":
+      return print((await read(config.dataDir)).tests);
+
+    case "test-ad":
+      return print(await startAdTest(JSON.parse(need(args[0], "параметры теста в формате JSON")) as StartTestInput, config, "agent"));
+
     default:
-      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate");
+      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate, daily, history, tests, test-ad");
   }
 }
 

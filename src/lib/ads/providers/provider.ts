@@ -6,6 +6,7 @@ import type {
   CampaignPlan,
   CampaignStats,
   CreateResult,
+  PlanAd,
 } from "../types.ts";
 
 /** Какие конверсии считать: цели и модель атрибуции из настроек кабинета. */
@@ -46,6 +47,8 @@ export interface AdsProvider {
 
   /** Создаёт кампанию с группами, фразами и объявлениями. Объявления остаются черновиками. */
   createCampaign(plan: CampaignPlan): Promise<CreateResult>;
+  /** Добавляет текстовые объявления в существующую группу; возвращает их идентификаторы. */
+  addAds(groupId: string, ads: PlanAd[]): Promise<string[]>;
   /** Отправляет объявления на модерацию — после неё начинаются показы и расход. */
   sendToModeration(adIds: string[]): Promise<void>;
 }

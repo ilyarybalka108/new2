@@ -5,12 +5,13 @@ import { validatePlan } from "./plan.ts";
 import { createDemoProvider, DEMO_ACCOUNTS } from "./providers/demo.ts";
 import type { AdsProvider } from "./providers/provider.ts";
 import { createYandexDirectProvider, discoverAccounts } from "./providers/yandex-direct.ts";
-import { appendLog, getSettings, readLog, saveSettings } from "./store.ts";
+import { appendLog, getSettings, read, readLog, saveSettings } from "./store.ts";
 import type {
   Account,
   AccountSettings,
   AccountView,
   ActionLogEntry,
+  ActionMeta,
   ActionRequest,
   BreakdownLevel,
   BreakdownRow,
@@ -58,7 +59,7 @@ function cached<T>(config: AdsConfig, key: string, ttl: number, load: () => Prom
   return data;
 }
 
-function invalidate(accountId: string) {
+export function invalidate(accountId: string) {
   for (const key of cache.keys()) if (key.startsWith(`data:${accountId}:`)) cache.delete(key);
 }
 
@@ -76,23 +77,23 @@ export function listAccounts(config: AdsConfig = loadConfig()): Promise<Account[
   return cached(config, "accounts", ACCOUNTS_TTL_MS, () => discoverAccounts({ token: config.token!, apiVersion: config.apiVersion }));
 }
 
-async function findAccount(config: AdsConfig, accountId: string): Promise<Account> {
+export async function findAccount(config: AdsConfig, accountId: string): Promise<Account> {
   const account = (await listAccounts(config)).find((a) => a.id === accountId);
   if (!account) throw new ActionError("Кабинет не найден", 404);
   return account;
 }
 
-function providerFor(config: AdsConfig, account: Account, today?: string): AdsProvider {
+export function providerFor(config: AdsConfig, account: Account, today?: string): AdsProvider {
   if (config.mode === "demo") return createDemoProvider(account.id, today);
   return createYandexDirectProvider({ token: config.token!, login: account.login, apiVersion: config.apiVersion });
 }
 
-interface Snapshot {
+export interface Snapshot {
   currency: string;
   campaigns: CampaignStats[];
 }
 
-function fetchSnapshot(
+export function fetchSnapshot(
   config: AdsConfig,
   account: Account,
   settings: AccountSettings,
@@ -190,6 +191,7 @@ export async function getOverview(
     insights.push(...analyzeAccount({ account: view, daily: currentDaily, days }));
   }
 
+  const state = await read(config.dataDir);
   const order = { critical: 0, warning: 1, opportunity: 2 };
   insights.sort((a, b) => order[a.severity] - order[b.severity]);
   const currencies = new Set(accounts.filter((a) => !a.error).map((a) => a.currency));
@@ -205,6 +207,8 @@ export async function getOverview(
     accounts,
     insights,
     log: await readLog(config.dataDir),
+    lastReport: state.reports[0] ?? null,
+    tests: state.tests.slice(0, 30),
   };
 }
 
@@ -294,6 +298,8 @@ export async function updateSettings(
     ...(settings.targetCpa && settings.targetCpa > 0 ? { targetCpa: settings.targetCpa } : {}),
     ...(settings.goals?.length ? { goals: settings.goals } : {}),
     ...(settings.attribution ? { attribution: settings.attribution } : {}),
+    ...(settings.monthlyBudget && settings.monthlyBudget > 0 ? { monthlyBudget: settings.monthlyBudget } : {}),
+    ...(settings.autopilot ? { autopilot: settings.autopilot } : {}),
   };
   await saveSettings(config.dataDir, account.id, clean);
   invalidate(account.id);
@@ -324,14 +330,15 @@ export function describeAction(action: ProposedAction, label?: string): string {
   }
 }
 
-function requireWrite(config: AdsConfig) {
+export function requireWrite(config: AdsConfig) {
   if (!config.writeEnabled) {
     throw new ActionError("Кабинет работает в режиме «только чтение». Чтобы разрешить изменения, задайте ADS_ALLOW_WRITE=1.", 403);
   }
 }
 
-async function record(config: AdsConfig, entry: Omit<ActionLogEntry, "id" | "at" | "ok" | "error">, run: () => Promise<void>) {
+export async function record(config: AdsConfig, entry: Omit<ActionLogEntry, "id" | "at" | "ok" | "error">, run: () => Promise<void>) {
   const result: ActionLogEntry = {
+    date: todayMoscow(),
     ...entry,
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     at: new Date().toISOString(),
@@ -347,36 +354,41 @@ async function record(config: AdsConfig, entry: Omit<ActionLogEntry, "id" | "at"
   return result;
 }
 
-/** Ищет кампанию в уже загруженных данных кабинета, чтобы не строить ради неё новый отчёт. */
-async function findCampaign(config: AdsConfig, account: Account, campaignId: string): Promise<CampaignStats | undefined> {
-  for (const [key, entry] of cache) {
-    if (!key.startsWith(`data:${account.id}:campaigns:`)) continue;
-    const snapshot = (await entry.data.catch(() => null)) as Snapshot | null;
-    const found = snapshot?.campaigns.find((c) => c.id === campaignId);
-    if (found) return found;
-  }
-  const p = periods(1);
-  const settings = await getSettings(config.dataDir, account.id);
-  const snapshot = await fetchSnapshot(config, account, settings, p.from, p.to);
-  return snapshot.campaigns.find((c) => c.id === campaignId);
-}
-
-export async function applyAction(req: ActionRequest, config: AdsConfig = loadConfig()): Promise<ActionLogEntry> {
+export async function applyAction(
+  req: ActionRequest,
+  config: AdsConfig = loadConfig(),
+  meta: ActionMeta = { actor: "human" },
+  today: string = todayMoscow(),
+): Promise<ActionLogEntry> {
   requireWrite(config);
   const account = await findAccount(config, req.accountId);
-  const campaign = await findCampaign(config, account, req.campaignId);
+  const settings = await getSettings(config.dataDir, account.id);
+  // Неделя до изменения — база, с которой потом сравнивается результат.
+  const p = periods(7, today);
+  const snapshot = await fetchSnapshot(config, account, settings, p.prevFrom, p.to, today);
+  const campaign = snapshot.campaigns.find((c) => c.id === req.campaignId);
   if (!campaign) throw new ActionError("Кампания не найдена", 404);
 
   const { action } = req;
   if (action.type === "set_budget" && !campaign.budgetEditable) {
     throw new ActionError("У этой кампании дневной бюджет через API не меняется (автостратегия)", 400);
   }
-  const provider = providerFor(config, account);
+  const provider = providerFor(config, account, today);
   const state = action.type === "pause" ? "paused" : "active";
 
   const entry = await record(
     config,
-    { accountName: account.name, campaignName: campaign.name, description: describeAction(action, req.label) },
+    {
+      date: today,
+      accountId: account.id,
+      accountName: account.name,
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      description: describeAction(action, req.label),
+      ...meta,
+      action,
+      before: sumRange(campaign.daily, p.from, p.to),
+    },
     () => {
       switch (action.type) {
         case "pause":

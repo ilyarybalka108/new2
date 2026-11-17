@@ -703,6 +703,17 @@ export function createYandexDirectProvider(opts: DirectOptions): AdsProvider {
       return { ok: steps.every((s) => s.ok), campaignId, steps, adIds };
     },
 
+    async addAds(groupId, ads) {
+      const result = await call<{ AddResults?: ActionResult[] }>("ads", "add", {
+        Ads: ads.map((ad) => ({
+          AdGroupId: Number(groupId),
+          TextAd: { Title: ad.title, ...(ad.title2 ? { Title2: ad.title2 } : {}), Text: ad.text, Href: ad.href, Mobile: "NO" },
+        })),
+      });
+      assertOk(result.AddResults, "Объявление не создано");
+      return (result.AddResults ?? []).filter((r) => r.Id).map((r) => String(r.Id));
+    },
+
     async sendToModeration(adIds) {
       for (const part of chunk(adIds, 1000)) {
         const result = await call<{ ModerateResults?: ActionResult[] }>("ads", "moderate", {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { changeHistory, computePacing, DEFAULT_POLICY, judge, permissionFor, runDaily, startAdTest, zScore } from "../src/lib/ads/autopilot.ts";
 import { loadConfig } from "../src/lib/ads/config.ts";
 import { isCoveredByNegatives } from "../src/lib/ads/insights.ts";
 import { change, derive, eachDay, periods, sumRange } from "../src/lib/ads/metrics.ts";
@@ -615,4 +616,175 @@ test("настройки и журнал переживают перезапус
     await rm(dir, { recursive: true, force: true });
     reset();
   }
+});
+
+// --- автономная работа ---------------------------------------------------------------
+
+const ON = { ...DEFAULT_POLICY, enabled: true };
+
+test("permissionFor, computePacing, judge, zScore", () => {
+  assert.equal(permissionFor({ type: "pause", target: "campaign", id: "1" }), "pauseCampaigns");
+  assert.equal(permissionFor({ type: "pause", target: "keyword", id: "1" }), "pauseKeywords");
+  assert.equal(permissionFor({ type: "add_negatives", phrases: ["x"] }), "negatives");
+  // Запуск остановленного автопилот не делает никогда.
+  assert.equal(permissionFor({ type: "resume", target: "ad", id: "1" }), null);
+
+  // 16 дней из 30 прошло, потрачено 80 000: прогноз 150 000.
+  assert.deepEqual(computePacing(80_000, "2026-11-17", 120_000), { monthlyBudget: 120_000, spent: 80_000, projected: 150_000, status: "over" });
+  assert.equal(computePacing(80_000, "2026-11-17", 150_000)?.status, "ok");
+  assert.equal(computePacing(80_000, "2026-11-17", 300_000)?.status, "under");
+  assert.equal(computePacing(0, "2026-11-01", 100_000), undefined);
+
+  const m = (cost: number, conversions: number) => ({ impressions: 1000, clicks: 100, cost, conversions });
+  const negatives = { type: "add_negatives", phrases: ["x"] } as const;
+  assert.equal(judge(m(10_000, 5), m(8_000, 5), negatives).verdict, "improved");
+  assert.equal(judge(m(10_000, 5), m(13_000, 5), negatives).verdict, "worse");
+  assert.equal(judge(m(10_000, 5), m(10_300, 5), negatives).verdict, "neutral");
+  assert.equal(judge(m(10_000, 1), m(8_000, 2), negatives).verdict, "insufficient");
+  assert.equal(judge(m(10_000, 0), m(0, 0), { type: "pause", target: "campaign", id: "1" }).verdict, "improved");
+
+  const ctr = (impressions: number, clicks: number) => ({ impressions, clicks, cost: 0, conversions: 0 });
+  assert.ok(zScore(ctr(5000, 200), ctr(5000, 300)) > 1.96);
+  assert.ok(Math.abs(zScore(ctr(5000, 200), ctr(5000, 205))) < 1.96);
+  assert.equal(zScore(ctr(0, 0), ctr(100, 5)), 0);
+});
+
+test("ежедневный обход без автопилота: ничего не меняет, всё выносит на решение", async () => {
+  reset();
+  const report = await runDaily(DEMO, TODAY);
+  assert.equal(report.accounts.length, 3);
+  assert.ok(report.accounts.every((a) => !a.autopilot && a.applied.length === 0));
+  assert.ok(report.accounts.every((a) => a.needsDecision.length > 0));
+  const o = await getOverview(7, DEMO, TODAY);
+  assert.equal(o.log.length, 0);
+  assert.equal(o.lastReport?.date, TODAY);
+});
+
+test("автопилот: сам делает разрешённое, бюджеты и остановку кампаний оставляет человеку", async () => {
+  reset();
+  await updateSettings("demo-clinic", { autopilot: ON }, DEMO);
+  const report = await runDaily(DEMO, TODAY);
+  const clinic = report.accounts.find((a) => a.accountId === "demo-clinic")!;
+  assert.equal(clinic.autopilot, true);
+  assert.ok(clinic.applied.length >= 5, `сделано ${clinic.applied.length}`);
+  assert.ok(clinic.applied.every((a) => a.ok && a.reason));
+  // Остановка кампании без конверсий и повышение бюджета не разрешены по умолчанию.
+  const waiting = clinic.needsDecision.map((i) => i.id);
+  assert.ok(waiting.includes("waste:demo-clinic:c104"));
+  assert.ok(waiting.includes("scale:demo-clinic:c101"));
+  // Остальные кабинеты без автопилота не тронуты.
+  assert.ok(report.accounts.filter((a) => a.accountId !== "demo-clinic").every((a) => a.applied.length === 0));
+
+  const history = await changeHistory(DEMO);
+  assert.equal(history.length, clinic.applied.length);
+  assert.ok(history.every((e) => e.actor === "autopilot" && e.insightId && e.before && e.date === TODAY && e.accountId === "demo-clinic"));
+  const kinds = new Set(history.map((e) => e.action!.type));
+  assert.ok(kinds.has("add_negatives") && kinds.has("pause"));
+  assert.ok(!kinds.has("set_budget"));
+  assert.ok(!history.some((e) => e.action!.type === "pause" && e.action!.target === "campaign"));
+
+  // Повторный обход в тот же день ничего не дублирует, а отчёт дня сохраняет сделанное ранее.
+  const again = await runDaily(DEMO, TODAY);
+  assert.equal(again.accounts.find((a) => a.accountId === "demo-clinic")!.applied.length, history.length);
+  assert.equal((await changeHistory(DEMO)).length, history.length);
+  assert.equal((await getOverview(7, DEMO, TODAY)).lastReport?.accounts[0].applied.length, history.length);
+});
+
+test("автопилот: лимит изменений в день и пробный прогон", async () => {
+  reset();
+  await updateSettings("demo-clinic", { autopilot: { ...ON, maxActionsPerDay: 2 } }, DEMO);
+
+  const dry = await runDaily(DEMO, TODAY, { dryRun: true });
+  const dryClinic = dry.accounts.find((a) => a.accountId === "demo-clinic")!;
+  assert.equal(dry.dryRun, true);
+  assert.equal(dryClinic.applied.length, 2);
+  // Пробный прогон ничего не выполняет и не сохраняет.
+  assert.equal((await changeHistory(DEMO)).length, 0);
+  assert.equal((await getOverview(7, DEMO, TODAY)).lastReport, null);
+
+  const real = await runDaily(DEMO, TODAY);
+  const clinic = real.accounts.find((a) => a.accountId === "demo-clinic")!;
+  assert.equal(clinic.applied.length, 2);
+  assert.ok(clinic.skipped.some((s) => /лимит изменений/.test(s.why)));
+  assert.equal((await changeHistory(DEMO)).length, 2);
+});
+
+test("автопилот с бюджетами: при перерасходе не повышает, а снижение не повторяет до результата", async () => {
+  reset();
+  const budgets = { ...ON, allow: { ...ON.allow, budgets: true } };
+  // Месячный бюджет заведомо ниже темпа расхода.
+  await updateSettings("demo-clinic", { autopilot: budgets, monthlyBudget: 50_000 }, DEMO);
+  await updateSettings("demo-shop", { autopilot: budgets }, DEMO);
+  const report = await runDaily(DEMO, TODAY);
+
+  const clinic = report.accounts.find((a) => a.accountId === "demo-clinic")!;
+  assert.equal(clinic.pacing?.status, "over");
+  assert.ok(clinic.skipped.some((s) => /месячного бюджета/.test(s.why)), "повышение бюджета должно быть отложено");
+  assert.ok(!(await changeHistory(DEMO)).some((e) => e.accountId === "demo-clinic" && e.action?.type === "set_budget"));
+
+  const shopCut = (await changeHistory(DEMO)).filter((e) => e.accountId === "demo-shop" && e.insightId === "expensive:demo-shop:c203");
+  assert.equal(shopCut.length, 1);
+  assert.deepEqual(shopCut[0].action, { type: "set_budget", amount: 4000 });
+
+  // На следующий день статистика почти та же — правило сработало бы снова и срезало бы ещё 20%.
+  const next = await runDaily(DEMO, "2026-11-18");
+  const shop = next.accounts.find((a) => a.accountId === "demo-shop")!;
+  assert.ok(shop.skipped.some((s) => /жду результата/.test(s.why)));
+  assert.equal((await changeHistory(DEMO)).filter((e) => e.insightId === "expensive:demo-shop:c203").length, 1);
+});
+
+test("итоги изменений подводятся через неделю", async () => {
+  reset();
+  await updateSettings("demo-clinic", { autopilot: ON }, DEMO);
+  await runDaily(DEMO, TODAY);
+  const made = (await changeHistory(DEMO)).length;
+
+  // Через три дня рано: недели после изменения ещё нет.
+  assert.deepEqual((await runDaily(DEMO, "2026-11-20")).evaluated, []);
+  const later = await runDaily(DEMO, "2026-11-25");
+  assert.equal(later.evaluated.length, made);
+  const history = await changeHistory(DEMO);
+  const original = history.filter((e) => e.date === TODAY);
+  assert.ok(original.every((e) => e.outcome && e.outcome.note && e.outcome.after.cost >= 0));
+  // Уже оценённые изменения повторно не оцениваются.
+  assert.deepEqual((await runDaily(DEMO, "2026-11-26")).evaluated.filter((x) => original.some((e) => e.description === x.description)), []);
+});
+
+test("тест объявления: запуск, один тест на группу, итог и остановка проигравшего", async () => {
+  reset();
+  await updateSettings("demo-shop", { autopilot: ON }, DEMO);
+  const ads = (await getCampaignDetail("demo-shop", "c201", 7, ["ads"], DEMO, TODAY)).breakdowns.ads;
+  const control = ads.find((a) => a.groupId === "c201g1")!;
+  const input = {
+    accountId: "demo-shop",
+    campaignId: "c201",
+    groupId: "c201g1",
+    controlAdId: control.key,
+    ad: { title: "Электрокотлы со склада", text: "Доставка за 1 день. Монтаж под ключ. Гарантия 5 лет.", href: "https://example.com/boilers" },
+    hypothesis: "Срок доставки в заголовке поднимет CTR",
+  };
+
+  await assert.rejects(startAdTest({ ...input, hypothesis: " " }, DEMO, "agent", TODAY), /гипотезу/);
+  await assert.rejects(startAdTest({ ...input, ad: { ...input.ad, href: "нет" } }, DEMO, "agent", TODAY), /не прошло проверку/);
+  await assert.rejects(startAdTest({ ...input, controlAdId: "nope" }, DEMO, "agent", TODAY), (e: unknown) => e instanceof ActionError && e.status === 404);
+
+  const started = await startAdTest(input, DEMO, "agent", TODAY);
+  assert.equal(started.status, "running");
+  assert.equal(started.controlLabel, control.label);
+  await assert.rejects(startAdTest(input, DEMO, "agent", TODAY), (e: unknown) => e instanceof ActionError && e.status === 409);
+  const afterStart = (await getCampaignDetail("demo-shop", "c201", 7, ["ads"], DEMO, TODAY)).breakdowns.ads;
+  assert.ok(afterStart.some((a) => a.key === started.variantAdId && a.label === "Электрокотлы со склада"));
+
+  // Через три дня данных мало — тест продолжается.
+  assert.deepEqual((await runDaily(DEMO, "2026-11-20")).finishedTests, []);
+  const done = await runDaily(DEMO, "2026-12-01");
+  assert.equal(done.finishedTests.length, 1);
+  assert.match(done.finishedTests[0].note, /Победил новый вариант.*остановлено/);
+
+  const o = await getOverview(7, DEMO, "2026-12-01");
+  assert.equal(o.tests[0].status, "finished");
+  assert.equal(o.tests[0].result?.winner, "variant");
+  const finalAds = (await getCampaignDetail("demo-shop", "c201", 7, ["ads"], DEMO, "2026-12-01")).breakdowns.ads;
+  assert.equal(finalAds.find((a) => a.key === control.key)?.state, "paused");
+  assert.equal(finalAds.find((a) => a.key === started.variantAdId)?.state, "active");
 });

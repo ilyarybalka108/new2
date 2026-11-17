@@ -4,7 +4,18 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { fmtDateTime, fmtDay, fmtInt, fmtMoney, fmtPct } from "@/lib/ads/format";
 import { derive } from "@/lib/ads/metrics";
-import type { AccountSettings, AccountView, CampaignView, Insight, Overview, ProposedAction } from "@/lib/ads/types";
+import type {
+  AccountSettings,
+  AccountView,
+  AutopilotPermission,
+  AutopilotPolicy,
+  CampaignView,
+  DailyReport,
+  Insight,
+  Overview,
+  ProposedAction,
+} from "@/lib/ads/types";
+import AgentPanel, { VERDICT } from "./AgentPanel";
 import {
   InsightCards,
   KIND_LABEL,
@@ -20,6 +31,23 @@ import TrendChart from "./TrendChart";
 
 // --- настройки кабинета -------------------------------------------------------
 
+/** Разрешения по умолчанию: совпадают с серверными (DEFAULT_POLICY в autopilot.ts). */
+const DEFAULT_POLICY: AutopilotPolicy = {
+  enabled: false,
+  allow: { negatives: true, placements: true, pauseKeywords: true, pauseAds: true, bids: true, budgets: false, pauseCampaigns: false },
+  maxActionsPerDay: 20,
+};
+
+const PERMISSIONS: [AutopilotPermission, string][] = [
+  ["negatives", "Добавлять минус-фразы"],
+  ["placements", "Запрещать площадки"],
+  ["pauseKeywords", "Останавливать фразы без конверсий"],
+  ["pauseAds", "Останавливать слабые объявления"],
+  ["bids", "Менять ставки фраз"],
+  ["budgets", "Менять дневные бюджеты кампаний"],
+  ["pauseCampaigns", "Останавливать кампании без конверсий"],
+];
+
 function SettingsDialog({
   account,
   onClose,
@@ -32,6 +60,8 @@ function SettingsDialog({
   const [targetCpa, setTargetCpa] = useState(account.settings.targetCpa ? String(account.settings.targetCpa) : "");
   const [goals, setGoals] = useState((account.settings.goals ?? []).join(", "));
   const [attribution, setAttribution] = useState<string>(account.settings.attribution ?? "");
+  const [monthlyBudget, setMonthlyBudget] = useState(account.settings.monthlyBudget ? String(account.settings.monthlyBudget) : "");
+  const [policy, setPolicy] = useState<AutopilotPolicy>(account.settings.autopilot ?? DEFAULT_POLICY);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -42,7 +72,14 @@ function SettingsDialog({
 
   const goalIds = goals.split(/[\s,;]+/).filter(Boolean);
   const cpa = Number(targetCpa.replace(",", "."));
-  const valid = (targetCpa.trim() === "" || (Number.isFinite(cpa) && cpa > 0)) && goalIds.every((g) => /^\d+$/.test(g)) && goalIds.length <= 10;
+  const monthly = Number(monthlyBudget.replace(",", ".").replace(/\s/g, ""));
+  const valid =
+    (targetCpa.trim() === "" || (Number.isFinite(cpa) && cpa > 0)) &&
+    (monthlyBudget.trim() === "" || (Number.isFinite(monthly) && monthly > 0)) &&
+    goalIds.every((g) => /^\d+$/.test(g)) &&
+    goalIds.length <= 10 &&
+    Number.isInteger(policy.maxActionsPerDay) &&
+    policy.maxActionsPerDay >= 1;
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -52,6 +89,8 @@ function SettingsDialog({
       ...(targetCpa.trim() ? { targetCpa: cpa } : {}),
       ...(goalIds.length ? { goals: goalIds } : {}),
       ...(attribution ? { attribution: attribution as AccountSettings["attribution"] } : {}),
+      ...(monthlyBudget.trim() ? { monthlyBudget: monthly } : {}),
+      autopilot: policy,
     };
     try {
       const res = await fetch("/api/ads/settings", {
@@ -108,6 +147,47 @@ function SettingsDialog({
           </select>
         </label>
 
+        <label className="mt-4 block text-sm">
+          <span className="text-ink-2">Бюджет на месяц, {account.currency}</span>
+          <input inputMode="decimal" value={monthlyBudget} onChange={(e) => setMonthlyBudget(e.target.value)} className={`${field} tabular-nums`} />
+          <span className="mt-1 block text-xs text-muted">Директолог следит за темпом расхода и не повышает бюджеты, если прогноз выше этой суммы.</span>
+        </label>
+
+        <fieldset className="mt-5 rounded-lg border border-line p-3 text-sm">
+          <legend className="px-1 font-medium">Автопилот</legend>
+          <label className="flex items-start gap-2">
+            <input type="checkbox" className="mt-1" checked={policy.enabled} onChange={(e) => setPolicy({ ...policy, enabled: e.target.checked })} />
+            <span>
+              Директолог сам вносит изменения в этом кабинете
+              <span className="block text-xs text-muted">Выключено — он только наблюдает и выносит рекомендации на твоё решение.</span>
+            </span>
+          </label>
+          <div className={`mt-3 grid gap-1.5 ${policy.enabled ? "" : "opacity-50"}`}>
+            <span className="text-ink-2">Что можно делать без подтверждения</span>
+            {PERMISSIONS.map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!policy.enabled}
+                  checked={policy.allow[key]}
+                  onChange={(e) => setPolicy({ ...policy, allow: { ...policy.allow, [key]: e.target.checked } })}
+                />
+                {label}
+              </label>
+            ))}
+            <label className="mt-2 block">
+              <span className="text-ink-2">Не больше изменений в день</span>
+              <input
+                inputMode="numeric"
+                disabled={!policy.enabled}
+                value={Number.isFinite(policy.maxActionsPerDay) ? String(policy.maxActionsPerDay) : ""}
+                onChange={(e) => setPolicy({ ...policy, maxActionsPerDay: e.target.value.trim() === "" ? NaN : Number(e.target.value) })}
+                className={`${field} tabular-nums`}
+              />
+            </label>
+          </div>
+        </fieldset>
+
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm">
             Отмена
@@ -120,6 +200,11 @@ function SettingsDialog({
     </div>
   );
 }
+
+/** Сколько последних записей журнала показывать сразу. */
+const LOG_PREVIEW = 8;
+
+const ACTOR = { human: "Вручную", autopilot: "Автопилот", agent: "Директолог" } as const;
 
 // --- кабинеты и кампании ------------------------------------------------------
 
@@ -151,6 +236,7 @@ function AccountCard({
           <div className="ml-5 text-sm text-muted">
             {account.platform === "yandex_direct" ? "Яндекс Директ" : "VK Реклама"} · кампаний: {account.campaigns.length}
             {account.settings.targetCpa ? ` · цель CPA ${fmtMoney(account.settings.targetCpa, cur)}` : ""}
+            {account.settings.autopilot?.enabled ? " · автопилот включён" : " · автопилот выключен"}
           </div>
         </div>
         {!account.error && (
@@ -278,10 +364,23 @@ export default function Dashboard() {
   const [days, setDays] = useState(7);
   const [reload, setReload] = useState(0);
   const [settingsFor, setSettingsFor] = useState<AccountView | null>(null);
+  const [showAllLog, setShowAllLog] = useState(false);
   const { data, error, loading } = useData<Overview>(`/api/ads/overview?days=${days}`, reload);
   const refresh = () => setReload((n) => n + 1);
   const actions = useActions(data?.mode === "live", data?.currency ?? "RUB", refresh);
   const canWrite = Boolean(data?.writeEnabled);
+
+  async function runDaily(dryRun: boolean): Promise<DailyReport> {
+    const res = await fetch("/api/ads/daily", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dryRun }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error ?? "Обход не выполнен");
+    if (!dryRun) refresh();
+    return body as DailyReport;
+  }
 
   function actOnInsight(insight: Insight) {
     const account = data?.accounts.find((a) => a.id === insight.accountId);
@@ -337,6 +436,14 @@ export default function Dashboard() {
           )}
           <Kpis current={data.totals.current} previous={data.totals.previous} currency={data.currency} />
           <TrendChart daily={data.daily} currency={data.currency} scope="все кабинеты" />
+          <AgentPanel
+            report={data.lastReport}
+            accounts={data.accounts}
+            tests={data.tests}
+            currency={data.currency}
+            canWrite={canWrite}
+            onRun={runDaily}
+          />
 
           <section className="rounded-xl border border-line bg-surface p-4 sm:p-5">
             <div className="flex items-baseline justify-between gap-3">
@@ -373,23 +480,40 @@ export default function Dashboard() {
           </section>
 
           <section className="rounded-xl border border-line bg-surface p-4 sm:p-5">
-            <h2 className="text-base font-semibold">Журнал действий</h2>
+            <h2 className="text-base font-semibold">Журнал изменений</h2>
             {data.log.length === 0 ? (
               <p className="mt-2 text-sm text-ink-2">Пока ничего не менялось.</p>
             ) : (
               <ul className="mt-2 divide-y divide-line text-sm">
-                {data.log.map((entry) => (
-                  <li key={entry.id} className="flex flex-wrap gap-x-3 py-2">
-                    <span className="text-muted tabular-nums">{fmtDateTime(entry.at)}</span>
-                    <span className={entry.ok ? "" : "text-bad"}>
-                      {entry.ok ? entry.description : `Не выполнено: ${entry.description}. ${entry.error}`}
-                    </span>
-                    <span className="text-ink-2">
-                      {entry.campaignName} · {entry.accountName}
-                    </span>
+                {data.log.slice(0, showAllLog ? undefined : LOG_PREVIEW).map((entry) => (
+                  <li key={entry.id} className="py-2">
+                    <div className="flex flex-wrap gap-x-3">
+                      <span className="text-muted tabular-nums">{fmtDateTime(entry.at)}</span>
+                      <span className="text-ink-2">{ACTOR[entry.actor ?? "human"]}</span>
+                      <span className={entry.ok ? "" : "text-bad"}>
+                        {entry.ok ? entry.description : `Не выполнено: ${entry.description}. ${entry.error}`}
+                      </span>
+                      <span className="text-ink-2">
+                        {entry.campaignName} · {entry.accountName}
+                      </span>
+                    </div>
+                    {entry.reason && <div className="mt-0.5 text-xs text-muted">{entry.reason}</div>}
+                    {entry.outcome && (
+                      <div className="mt-0.5 text-xs">
+                        <span className={VERDICT[entry.outcome.verdict].color}>
+                          {VERDICT[entry.outcome.verdict].icon} {VERDICT[entry.outcome.verdict].label}
+                        </span>
+                        <span className="text-muted"> — {entry.outcome.note}</span>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
+            )}
+            {data.log.length > LOG_PREVIEW && (
+              <button type="button" onClick={() => setShowAllLog((v) => !v)} className="mt-2 text-sm text-accent hover:underline">
+                {showAllLog ? "Свернуть" : `Показать ещё ${data.log.length - LOG_PREVIEW}`}
+              </button>
             )}
           </section>
         </div>
