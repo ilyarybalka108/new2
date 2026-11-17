@@ -30,7 +30,7 @@ function niceScale(max: number): { top: number; step: number } {
   return { top: step * Math.ceil(max / step), step };
 }
 
-export default function TrendChart({ daily, currency }: { daily: DailyPoint[]; currency: string }) {
+export default function TrendChart({ daily, currency, scope }: { daily: DailyPoint[]; currency: string; scope: string }) {
   const [metric, setMetric] = useState<MetricKey>("cost");
   const [asTable, setAsTable] = useState(false);
   const [hover, setHover] = useState<number | null>(null);
@@ -88,7 +88,7 @@ export default function TrendChart({ daily, currency }: { daily: DailyPoint[]; c
   return (
     <section className="rounded-xl border border-line bg-surface p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-base font-semibold">{label} по дням, все кабинеты</h2>
+        <h2 className="text-base font-semibold">{label} по дням, {scope}</h2>
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex rounded-lg border border-line p-0.5" role="group" aria-label="Показатель">
             {METRICS.map((m) => (

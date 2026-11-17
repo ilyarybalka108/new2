@@ -1,123 +1,125 @@
-import { analyzeAccount } from "./insights.ts";
+import { type AdsConfig, loadConfig } from "./config.ts";
+import { analyzeAccount, analyzeCampaign, isCoveredByNegatives, referenceCpa } from "./insights.ts";
 import { eachDay, periods, sum, sumRange, todayMoscow, ZERO } from "./metrics.ts";
+import { validatePlan } from "./plan.ts";
 import { createDemoProvider, DEMO_ACCOUNTS } from "./providers/demo.ts";
 import type { AdsProvider } from "./providers/provider.ts";
-import { createYandexDirectProvider } from "./providers/yandex-direct.ts";
+import { createYandexDirectProvider, discoverAccounts } from "./providers/yandex-direct.ts";
+import { appendLog, getSettings, readLog, saveSettings } from "./store.ts";
 import type {
-  AccountConfig,
+  Account,
+  AccountSettings,
   AccountView,
   ActionLogEntry,
   ActionRequest,
+  BreakdownLevel,
+  BreakdownRow,
+  CampaignDetail,
+  CampaignPlan,
   CampaignStats,
+  CreateResult,
   DailyPoint,
   Insight,
   Overview,
   ProposedAction,
 } from "./types.ts";
 
-// --- конфигурация -----------------------------------------------------------
+export { loadConfig, type AdsConfig };
 
-export interface AdsConfig {
-  mode: "demo" | "live";
-  accounts: AccountConfig[];
-  writeEnabled: boolean;
-}
+export const BREAKDOWN_LEVELS: BreakdownLevel[] = ["groups", "ads", "keywords", "queries", "placements"];
 
-/**
- * Кабинеты описываются переменной ADS_ACCOUNTS (JSON-массив). Токены в неё не пишутся:
- * у каждого кабинета указывается tokenEnv — имя переменной с токеном.
- * Без ADS_ACCOUNTS кабинет работает на демо-данных.
- */
-export function loadConfig(env: Record<string, string | undefined> = process.env): AdsConfig {
-  const raw = env.ADS_ACCOUNTS?.trim();
-  if (!raw) return { mode: "demo", accounts: DEMO_ACCOUNTS, writeEnabled: true };
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("ADS_ACCOUNTS: не удалось разобрать JSON");
+/** Ошибка с HTTP-статусом: неверный запрос, нет прав, не найдено. */
+export class ActionError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ActionError";
+    this.status = status;
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("ADS_ACCOUNTS: ожидается непустой массив кабинетов");
-  }
-  const seen = new Set<string>();
-  const accounts = parsed.map((item, i): AccountConfig => {
-    const a = item as Partial<AccountConfig>;
-    if (!a.id || !a.name) throw new Error(`ADS_ACCOUNTS[${i}]: нужны поля id и name`);
-    if (seen.has(a.id)) throw new Error(`ADS_ACCOUNTS: повторяется id «${a.id}»`);
-    seen.add(a.id);
-    const platform = a.platform ?? "yandex_direct";
-    if (platform !== "yandex_direct") {
-      throw new Error(`ADS_ACCOUNTS[${i}]: площадка «${platform}» пока не поддерживается`);
-    }
-    if (!a.tokenEnv) throw new Error(`ADS_ACCOUNTS[${i}]: укажите tokenEnv — имя переменной с токеном`);
-    return { id: a.id, name: a.name, platform, login: a.login, tokenEnv: a.tokenEnv, sandbox: a.sandbox };
-  });
-  // Изменения в боевых кабинетах выключены, пока их явно не разрешили.
-  return { mode: "live", accounts, writeEnabled: env.ADS_ALLOW_WRITE === "1" };
 }
 
-function providerFor(config: AdsConfig, account: AccountConfig, today?: string): AdsProvider {
-  if (config.mode === "demo") return createDemoProvider(account.id, today);
-  const token = process.env[account.tokenEnv!];
-  if (!token) throw new Error(`Не задана переменная ${account.tokenEnv} с токеном`);
-  return createYandexDirectProvider({ token, login: account.login, sandbox: account.sandbox });
-}
+// --- кеш ответов API --------------------------------------------------------------
 
-// --- состояние процесса: кеш ответов API и журнал действий -------------------
-
-interface Snapshot {
-  currency: string;
-  campaigns: CampaignStats[];
-}
-
-const store = globalThis as typeof globalThis & {
-  __adsCache?: Map<string, { at: number; data: Promise<Snapshot> }>;
-  __adsLog?: ActionLogEntry[];
-};
-const cache: Map<string, { at: number; data: Promise<Snapshot> }> = (store.__adsCache ??= new Map());
-const log: ActionLogEntry[] = (store.__adsLog ??= []);
+const store = globalThis as typeof globalThis & { __adsCache?: Map<string, { at: number; data: Promise<unknown> }> };
+const cache: Map<string, { at: number; data: Promise<unknown> }> = (store.__adsCache ??= new Map());
 
 // Отчёты Директа расходуют баллы и строятся не мгновенно — не дёргаем API на каждое обновление страницы.
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const DATA_TTL_MS = 5 * 60 * 1000;
+const ACCOUNTS_TTL_MS = 30 * 60 * 1000;
 
-function fetchSnapshot(
-  config: AdsConfig,
-  account: AccountConfig,
-  from: string,
-  to: string,
-  today?: string,
-): Promise<Snapshot> {
-  if (config.mode === "demo") return providerFor(config, account, today).fetchCampaigns(from, to);
-  const key = `${account.id}:${from}:${to}`;
+/** В демо-режиме данные считаются мгновенно и должны сразу отражать изменения — кеш не нужен. */
+function cached<T>(config: AdsConfig, key: string, ttl: number, load: () => Promise<T>): Promise<T> {
+  if (config.mode === "demo") return load();
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data;
-  const data = Promise.resolve().then(() => providerFor(config, account).fetchCampaigns(from, to));
+  if (hit && Date.now() - hit.at < ttl) return hit.data as Promise<T>;
+  const data = Promise.resolve().then(load);
   cache.set(key, { at: Date.now(), data });
   data.catch(() => cache.delete(key));
   return data;
 }
 
 function invalidate(accountId: string) {
-  for (const key of cache.keys()) if (key.startsWith(`${accountId}:`)) cache.delete(key);
+  for (const key of cache.keys()) if (key.startsWith(`data:${accountId}:`)) cache.delete(key);
 }
 
-// --- сводка -----------------------------------------------------------------
+export function clearCache() {
+  cache.clear();
+}
 
-export function buildAccountView(
-  account: AccountConfig,
-  snapshot: Snapshot,
-  p: { from: string; to: string; prevFrom: string; prevTo: string },
-): AccountView {
+// --- кабинеты и доступ к площадке -----------------------------------------------
+
+export function listAccounts(config: AdsConfig = loadConfig()): Promise<Account[]> {
+  if (config.mode === "demo") return Promise.resolve(DEMO_ACCOUNTS);
+  if (config.clientLogins) {
+    return Promise.resolve(config.clientLogins.map((login) => ({ id: login, name: login, platform: "yandex_direct", login })));
+  }
+  return cached(config, "accounts", ACCOUNTS_TTL_MS, () => discoverAccounts({ token: config.token!, apiVersion: config.apiVersion }));
+}
+
+async function findAccount(config: AdsConfig, accountId: string): Promise<Account> {
+  const account = (await listAccounts(config)).find((a) => a.id === accountId);
+  if (!account) throw new ActionError("Кабинет не найден", 404);
+  return account;
+}
+
+function providerFor(config: AdsConfig, account: Account, today?: string): AdsProvider {
+  if (config.mode === "demo") return createDemoProvider(account.id, today);
+  return createYandexDirectProvider({ token: config.token!, login: account.login, apiVersion: config.apiVersion });
+}
+
+interface Snapshot {
+  currency: string;
+  campaigns: CampaignStats[];
+}
+
+function fetchSnapshot(
+  config: AdsConfig,
+  account: Account,
+  settings: AccountSettings,
+  from: string,
+  to: string,
+  today?: string,
+): Promise<Snapshot> {
+  const stats = { goals: settings.goals, attribution: settings.attribution };
+  return cached(config, `data:${account.id}:campaigns:${from}:${to}:${JSON.stringify(stats)}`, DATA_TTL_MS, () =>
+    providerFor(config, account, today).fetchCampaigns(from, to, stats),
+  );
+}
+
+// --- сводка -----------------------------------------------------------------------
+
+interface Periods {
+  from: string;
+  to: string;
+  prevFrom: string;
+  prevTo: string;
+}
+
+export function buildAccountView(account: Account, settings: AccountSettings, snapshot: Snapshot, p: Periods): AccountView {
   const campaigns = snapshot.campaigns
     .map((c) => {
       const { daily, ...campaign } = c;
-      return {
-        ...campaign,
-        current: sumRange(daily, p.from, p.to),
-        previous: sumRange(daily, p.prevFrom, p.prevTo),
-      };
+      return { ...campaign, current: sumRange(daily, p.from, p.to), previous: sumRange(daily, p.prevFrom, p.prevTo) };
     })
     .sort((a, b) => b.current.cost - a.current.cost);
   return {
@@ -125,6 +127,7 @@ export function buildAccountView(
     name: account.name,
     platform: account.platform,
     currency: snapshot.currency,
+    settings,
     current: sum(campaigns.map((c) => c.current)),
     previous: sum(campaigns.map((c) => c.previous)),
     campaigns,
@@ -137,22 +140,22 @@ export async function getOverview(
   today: string = todayMoscow(),
 ): Promise<Overview> {
   const p = periods(days, today);
+  const all = await listAccounts(config);
 
   const results = await Promise.all(
-    config.accounts.map(async (account) => {
+    all.map(async (account) => {
+      const settings = await getSettings(config.dataDir, account.id);
       try {
-        return { account, snapshot: await fetchSnapshot(config, account, p.prevFrom, p.to, today) };
+        return { account, settings, snapshot: await fetchSnapshot(config, account, settings, p.prevFrom, p.to, today) };
       } catch (e) {
-        return { account, error: e instanceof Error ? e.message : String(e) };
+        return { account, settings, error: e instanceof Error ? e.message : String(e) };
       }
     }),
   );
 
   const accounts: AccountView[] = [];
   const insights: Insight[] = [];
-  const dailyTotals = new Map<string, DailyPoint>(
-    eachDay(p.from, p.to).map((date) => [date, { date, ...ZERO }]),
-  );
+  const dailyTotals = new Map<string, DailyPoint>(eachDay(p.from, p.to).map((date) => [date, { date, ...ZERO }]));
 
   for (const r of results) {
     if (!("snapshot" in r) || !r.snapshot) {
@@ -161,6 +164,7 @@ export async function getOverview(
         name: r.account.name,
         platform: r.account.platform,
         currency: "RUB",
+        settings: r.settings,
         current: ZERO,
         previous: ZERO,
         campaigns: [],
@@ -168,7 +172,7 @@ export async function getOverview(
       });
       continue;
     }
-    const view = buildAccountView(r.account, r.snapshot, p);
+    const view = buildAccountView(r.account, r.settings, r.snapshot, p);
     accounts.push(view);
 
     const currentDaily = new Map<string, DailyPoint[]>();
@@ -188,7 +192,6 @@ export async function getOverview(
 
   const order = { critical: 0, warning: 1, opportunity: 2 };
   insights.sort((a, b) => order[a.severity] - order[b.severity]);
-
   const currencies = new Set(accounts.filter((a) => !a.error).map((a) => a.currency));
 
   return {
@@ -197,82 +200,240 @@ export async function getOverview(
     range: { from: p.from, to: p.to, days },
     currency: [...currencies][0] ?? "RUB",
     mixedCurrency: currencies.size > 1,
-    totals: {
-      current: sum(accounts.map((a) => a.current)),
-      previous: sum(accounts.map((a) => a.previous)),
-    },
+    totals: { current: sum(accounts.map((a) => a.current)), previous: sum(accounts.map((a) => a.previous)) },
     daily: [...dailyTotals.values()],
     accounts,
     insights,
-    log: log.slice(0, 20),
+    log: await readLog(config.dataDir),
   };
 }
 
-// --- действия ---------------------------------------------------------------
+// --- одна кампания ----------------------------------------------------------------
 
-/** Ищет кампанию в уже загруженных данных кабинета, чтобы не строить ради неё новый отчёт. */
-async function findCampaign(config: AdsConfig, account: AccountConfig, campaignId: string) {
-  for (const [key, entry] of cache) {
-    if (!key.startsWith(`${account.id}:`)) continue;
-    const found = (await entry.data.catch(() => null))?.campaigns.find((c) => c.id === campaignId);
-    if (found) return found;
+/**
+ * Детализация кампании. Уровни запрашиваются выборочно: отчёт по поисковым запросам
+ * Директ строит только в офлайн-режиме, и ждать его вместе с остальным незачем.
+ */
+export async function getCampaignDetail(
+  accountId: string,
+  campaignId: string,
+  days: number,
+  levels: BreakdownLevel[] = BREAKDOWN_LEVELS,
+  config: AdsConfig = loadConfig(),
+  today: string = todayMoscow(),
+): Promise<CampaignDetail> {
+  const p = periods(days, today);
+  const account = await findAccount(config, accountId);
+  const settings = await getSettings(config.dataDir, account.id);
+  const snapshot = await fetchSnapshot(config, account, settings, p.prevFrom, p.to, today);
+  const view = buildAccountView(account, settings, snapshot, p);
+  const campaign = view.campaigns.find((c) => c.id === campaignId);
+  const stats = snapshot.campaigns.find((c) => c.id === campaignId);
+  if (!campaign || !stats) throw new ActionError("Кампания не найдена", 404);
+
+  const provider = providerFor(config, account, today);
+  const statsOpts = { goals: settings.goals, attribution: settings.attribution };
+  const key = (what: string) => `data:${account.id}:${campaignId}:${what}:${p.from}:${p.to}:${JSON.stringify(statsOpts)}`;
+
+  const [exclusions, ...loaded] = await Promise.all([
+    cached(config, key("exclusions"), DATA_TTL_MS, () => provider.fetchExclusions(campaignId)),
+    ...levels.map((level) =>
+      cached(config, key(level), DATA_TTL_MS, () => provider.fetchBreakdown(campaignId, level, p.from, p.to, statsOpts)).then(
+        (rows) => ({ level, rows }),
+        (e: unknown) => ({ level, error: e instanceof Error ? e.message : String(e) }),
+      ),
+    ),
+  ]);
+
+  const breakdowns: Record<BreakdownLevel, BreakdownRow[]> = { groups: [], ads: [], keywords: [], queries: [], placements: [] };
+  const breakdownErrors: CampaignDetail["breakdownErrors"] = {};
+  const excluded = new Set(exclusions.excludedSites.map((s) => s.toLowerCase()));
+  for (const item of loaded) {
+    if ("error" in item) {
+      breakdownErrors[item.level] = item.error;
+      continue;
+    }
+    breakdowns[item.level] = item.rows
+      .map((row) => ({
+        ...row,
+        // Уже обработанные запросы и площадки помечаем, чтобы не предлагать их повторно.
+        ...(item.level === "queries" ? { handled: isCoveredByNegatives(row.key, exclusions.negativeKeywords) } : {}),
+        ...(item.level === "placements" ? { handled: excluded.has(row.key.toLowerCase()) } : {}),
+      }))
+      .sort((a, b) => b.cost - a.cost);
   }
-  const p = periods(1);
-  const snapshot = await fetchSnapshot(config, account, p.from, p.to);
-  return snapshot.campaigns.find((c) => c.id === campaignId);
+
+  const ref = referenceCpa(view);
+  const loadedLevels = Object.fromEntries(levels.filter((l) => !breakdownErrors[l]).map((l) => [l, breakdowns[l]]));
+
+  return {
+    mode: config.mode,
+    writeEnabled: config.writeEnabled,
+    range: { from: p.from, to: p.to, days },
+    account: { id: account.id, name: account.name, currency: snapshot.currency, settings },
+    campaign,
+    daily: eachDay(p.from, p.to).map((date) => stats.daily.find((d) => d.date === date) ?? { date, ...ZERO }),
+    referenceCpa: ref.value,
+    referenceCpaSource: ref.source,
+    exclusions,
+    breakdowns,
+    breakdownErrors,
+    insights: analyzeCampaign({ account, campaign, referenceCpa: ref.value, breakdowns: loadedLevels, days }),
+  };
 }
 
-export function describeAction(action: ProposedAction): string {
+// --- настройки кабинета ------------------------------------------------------------
+
+export async function updateSettings(
+  accountId: string,
+  settings: AccountSettings,
+  config: AdsConfig = loadConfig(),
+): Promise<AccountSettings> {
+  const account = await findAccount(config, accountId);
+  const clean: AccountSettings = {
+    ...(settings.targetCpa && settings.targetCpa > 0 ? { targetCpa: settings.targetCpa } : {}),
+    ...(settings.goals?.length ? { goals: settings.goals } : {}),
+    ...(settings.attribution ? { attribution: settings.attribution } : {}),
+  };
+  await saveSettings(config.dataDir, account.id, clean);
+  invalidate(account.id);
+  return clean;
+}
+
+// --- действия -----------------------------------------------------------------------
+
+const money = (amount: number) => `${Math.round(amount).toLocaleString("ru-RU")} ₽`;
+
+export function describeAction(action: ProposedAction, label?: string): string {
+  const what = label ? ` «${label}»` : "";
   switch (action.type) {
     case "pause":
-      return "Кампания остановлена";
-    case "resume":
-      return "Кампания запущена";
+    case "resume": {
+      const noun = action.target === "campaign" ? "Кампания" : action.target === "ad" ? `Объявление${what}` : `Фраза${what}`;
+      const verb = action.type === "pause" ? "остановлен" : "запущен";
+      return `${noun} ${verb}${action.target === "ad" ? "о" : "а"}`;
+    }
     case "set_budget":
-      return `Дневной бюджет изменён на ${Math.round(action.amount).toLocaleString("ru-RU")} ₽`;
+      return `Дневной бюджет изменён на ${money(action.amount)}`;
+    case "set_bid":
+      return `Ставка фразы${what} изменена на ${money(action.amount)}`;
+    case "add_negatives":
+      return `Добавлены минус-фразы: ${action.phrases.join(", ")}`;
+    case "exclude_placements":
+      return `Запрещены показы на площадках: ${action.sites.join(", ")}`;
   }
 }
 
-export class ActionError extends Error {
-  readonly status: number;
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "ActionError";
-    this.status = status;
-  }
-}
-
-export async function applyAction(req: ActionRequest, config: AdsConfig = loadConfig()): Promise<ActionLogEntry> {
+function requireWrite(config: AdsConfig) {
   if (!config.writeEnabled) {
     throw new ActionError("Кабинет работает в режиме «только чтение». Чтобы разрешить изменения, задайте ADS_ALLOW_WRITE=1.", 403);
   }
-  const account = config.accounts.find((a) => a.id === req.accountId);
-  if (!account) throw new ActionError("Кабинет не найден", 404);
+}
 
-  const provider = providerFor(config, account);
-  const campaign = await findCampaign(config, account, req.campaignId);
-  if (!campaign) throw new ActionError("Кампания не найдена", 404);
-  if (req.action.type === "set_budget" && !campaign.budgetEditable) {
-    throw new ActionError("У этой кампании дневной бюджет через API не меняется (автостратегия)", 400);
-  }
-
-  const entry: ActionLogEntry = {
+async function record(config: AdsConfig, entry: Omit<ActionLogEntry, "id" | "at" | "ok" | "error">, run: () => Promise<void>) {
+  const result: ActionLogEntry = {
+    ...entry,
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     at: new Date().toISOString(),
-    accountName: account.name,
-    campaignName: campaign.name,
-    description: describeAction(req.action),
     ok: true,
   };
   try {
-    if (req.action.type === "set_budget") await provider.setDailyBudget(campaign.id, req.action.amount);
-    else await provider.setCampaignState(campaign.id, req.action.type === "pause" ? "paused" : "active");
+    await run();
   } catch (e) {
-    entry.ok = false;
-    entry.error = e instanceof Error ? e.message : String(e);
+    result.ok = false;
+    result.error = e instanceof Error ? e.message : String(e);
   }
+  await appendLog(config.dataDir, result);
+  return result;
+}
+
+/** Ищет кампанию в уже загруженных данных кабинета, чтобы не строить ради неё новый отчёт. */
+async function findCampaign(config: AdsConfig, account: Account, campaignId: string): Promise<CampaignStats | undefined> {
+  for (const [key, entry] of cache) {
+    if (!key.startsWith(`data:${account.id}:campaigns:`)) continue;
+    const snapshot = (await entry.data.catch(() => null)) as Snapshot | null;
+    const found = snapshot?.campaigns.find((c) => c.id === campaignId);
+    if (found) return found;
+  }
+  const p = periods(1);
+  const settings = await getSettings(config.dataDir, account.id);
+  const snapshot = await fetchSnapshot(config, account, settings, p.from, p.to);
+  return snapshot.campaigns.find((c) => c.id === campaignId);
+}
+
+export async function applyAction(req: ActionRequest, config: AdsConfig = loadConfig()): Promise<ActionLogEntry> {
+  requireWrite(config);
+  const account = await findAccount(config, req.accountId);
+  const campaign = await findCampaign(config, account, req.campaignId);
+  if (!campaign) throw new ActionError("Кампания не найдена", 404);
+
+  const { action } = req;
+  if (action.type === "set_budget" && !campaign.budgetEditable) {
+    throw new ActionError("У этой кампании дневной бюджет через API не меняется (автостратегия)", 400);
+  }
+  const provider = providerFor(config, account);
+  const state = action.type === "pause" ? "paused" : "active";
+
+  const entry = await record(
+    config,
+    { accountName: account.name, campaignName: campaign.name, description: describeAction(action, req.label) },
+    () => {
+      switch (action.type) {
+        case "pause":
+        case "resume":
+          if (action.target === "campaign") return provider.setCampaignState(campaign.id, state);
+          if (action.target === "ad") return provider.setAdState(action.id, state);
+          return provider.setKeywordState(action.id, state);
+        case "set_budget":
+          return provider.setDailyBudget(campaign.id, action.amount);
+        case "set_bid":
+          return provider.setKeywordBid(action.keywordId, action.amount);
+        case "add_negatives":
+          return provider.addNegativeKeywords(campaign.id, action.phrases);
+        case "exclude_placements":
+          return provider.excludePlacements(campaign.id, action.sites);
+      }
+    },
+  );
   invalidate(account.id);
-  log.unshift(entry);
-  log.length = Math.min(log.length, 200);
+  return entry;
+}
+
+// --- создание кампаний --------------------------------------------------------------
+
+/** Создаёт кампанию по плану. Объявления остаются черновиками: расход начнётся только после модерации. */
+export async function createCampaign(plan: CampaignPlan, config: AdsConfig = loadConfig()): Promise<CreateResult> {
+  requireWrite(config);
+  const issues = validatePlan(plan);
+  if (issues.length) {
+    throw new ActionError(`План не прошёл проверку: ${issues.map((i) => i.message).join("; ")}`, 400);
+  }
+  const account = await findAccount(config, plan.accountId);
+  let result: CreateResult = { ok: false, steps: [], adIds: [] };
+  await record(config, { accountName: account.name, campaignName: plan.name, description: "Создана кампания (черновик)" }, async () => {
+    result = await providerFor(config, account).createCampaign(plan);
+    if (!result.ok) {
+      const failed = result.steps.find((s) => !s.ok);
+      throw new Error(failed ? `${failed.step}: ${failed.detail}` : "Кампания создана не полностью");
+    }
+  });
+  invalidate(account.id);
+  return result;
+}
+
+export async function sendToModeration(
+  accountId: string,
+  campaignName: string,
+  adIds: string[],
+  config: AdsConfig = loadConfig(),
+): Promise<ActionLogEntry> {
+  requireWrite(config);
+  const account = await findAccount(config, accountId);
+  const entry = await record(
+    config,
+    { accountName: account.name, campaignName, description: `Объявления отправлены на модерацию: ${adIds.length} шт.` },
+    () => providerFor(config, account).sendToModeration(adIds),
+  );
+  invalidate(account.id);
   return entry;
 }
