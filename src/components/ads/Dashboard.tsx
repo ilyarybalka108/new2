@@ -414,6 +414,9 @@ export default function Dashboard() {
           <button type="button" onClick={refresh} className="rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink-2 hover:text-ink">
             Обновить
           </button>
+          <Link href="/creatives" className="rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink-2 hover:text-ink">
+            Креативы
+          </Link>
           <Link href="/new" className="rounded-lg bg-ink px-3 py-1.5 text-sm font-medium text-page">
             Новая кампания
           </Link>

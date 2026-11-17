@@ -9,6 +9,7 @@ import type {
   DailyPoint,
   EntityState,
   Metrics,
+  PlanAd,
 } from "../types.ts";
 import type { AdsProvider, StatsOptions } from "./provider.ts";
 
@@ -193,6 +194,18 @@ function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+/** Тело текстового объявления для Ads.add. */
+function textAd(ad: PlanAd) {
+  return {
+    Title: ad.title,
+    ...(ad.title2 ? { Title2: ad.title2 } : {}),
+    Text: ad.text,
+    Href: ad.href,
+    Mobile: "NO",
+    ...(ad.imageHash ? { AdImageHash: ad.imageHash } : {}),
+  };
 }
 
 /** Низкоуровневый клиент: авторизация, ограничение параллельности, отчёты. */
@@ -674,7 +687,7 @@ export function createYandexDirectProvider(opts: DirectOptions): AdsProvider {
         groupIds[i]
           ? g.ads.map((ad) => ({
               AdGroupId: groupIds[i],
-              TextAd: { Title: ad.title, ...(ad.title2 ? { Title2: ad.title2 } : {}), Text: ad.text, Href: ad.href, Mobile: "NO" },
+              TextAd: textAd(ad),
             }))
           : [],
       );
@@ -703,11 +716,21 @@ export function createYandexDirectProvider(opts: DirectOptions): AdsProvider {
       return { ok: steps.every((s) => s.ok), campaignId, steps, adIds };
     },
 
+    async uploadImage(name, data) {
+      const result = await call<{ AddResults?: (ActionResult & { AdImageHash?: string })[] }>("adimages", "add", {
+        AdImages: [{ ImageData: data.toString("base64"), Name: name }],
+      });
+      assertOk(result.AddResults, "Изображение не загружено");
+      const hash = result.AddResults?.[0]?.AdImageHash;
+      if (!hash) throw new DirectApiError("API не вернул идентификатор изображения");
+      return hash;
+    },
+
     async addAds(groupId, ads) {
       const result = await call<{ AddResults?: ActionResult[] }>("ads", "add", {
         Ads: ads.map((ad) => ({
           AdGroupId: Number(groupId),
-          TextAd: { Title: ad.title, ...(ad.title2 ? { Title2: ad.title2 } : {}), Text: ad.text, Href: ad.href, Mobile: "NO" },
+          TextAd: textAd(ad),
         })),
       });
       assertOk(result.AddResults, "Объявление не создано");

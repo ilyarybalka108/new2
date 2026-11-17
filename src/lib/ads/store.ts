@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AccountSettings, ActionLogEntry, AdTest, DailyReport } from "./types.ts";
+import type { AccountSettings, ActionLogEntry, AdTest, CreativeRecord, DailyReport } from "./types.ts";
 
 // Состояние, которое должно переживать перезапуск: настройки кабинетов, журнал изменений,
 // отчёты ежедневных обходов и тесты объявлений. Один JSON-файл — достаточно для одного
@@ -11,11 +11,12 @@ export interface State {
   log: ActionLogEntry[];
   reports: DailyReport[];
   tests: AdTest[];
+  creatives: CreativeRecord[];
 }
 
 const MAX_LOG = 2000;
 const MAX_REPORTS = 90;
-const empty = (): State => ({ settings: {}, log: [], reports: [], tests: [] });
+const empty = (): State => ({ settings: {}, log: [], reports: [], tests: [], creatives: [] });
 
 interface Slot {
   dir: string | null;

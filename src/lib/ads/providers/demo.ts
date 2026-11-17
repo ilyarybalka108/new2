@@ -561,6 +561,10 @@ export function createDemoProvider(accountId: string, today: string = todayMosco
       };
     },
 
+    async uploadImage(name, data) {
+      return `demo-${hash(`${name}:${data.length}`).toString(36)}`;
+    },
+
     async addAds(groupId, ads) {
       const campaign = campaigns().find((c) => groupId.startsWith(`${c.id}g`));
       const index = campaign ? Number(groupId.slice(campaign.id.length + 1)) : NaN;

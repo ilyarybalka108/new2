@@ -304,6 +304,45 @@ export interface PlanAd {
   title2?: string;
   text: string;
   href: string;
+  /** Изображение объявления: идентификатор, полученный при загрузке картинки на площадку. */
+  imageHash?: string;
+}
+
+// --- креативы ---------------------------------------------------------------------
+
+/** Содержание статичного креатива: из него отрисовываются баннеры всех форматов. */
+export interface CreativeSpec {
+  /** Главный оффер — самая крупная надпись. */
+  headline: string;
+  subline?: string;
+  /** Текст кнопки. */
+  cta?: string;
+  /** Плашка с ценой или скидкой: «от 25 000 ₽», «−20%». */
+  badge?: string;
+  brand: string;
+  /** Фирменный цвет, #RRGGBB. */
+  color: string;
+  /** Цветовое решение: заливка фирменным цветом, светлый или тёмный фон. */
+  style: "solid" | "light" | "dark";
+  /** Путь к фотографии для фона; без неё фон — градиент фирменного цвета. */
+  backgroundFile?: string;
+}
+
+/** Запись библиотеки креативов. */
+export interface CreativeRecord {
+  id: string;
+  createdAt: string;
+  accountId: string;
+  accountName: string;
+  spec: CreativeSpec;
+  /** Ключи отрисованных форматов. */
+  formats: string[];
+  /** Размер файла каждого формата в байтах. */
+  bytes: Record<string, number>;
+  /** Идентификаторы изображений на площадке — для уже загруженных форматов. */
+  uploads: Record<string, string>;
+  /** Зачем сделан креатив: гипотеза или задача. */
+  note?: string;
 }
 
 export interface PlanGroup {

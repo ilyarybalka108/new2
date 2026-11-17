@@ -47,6 +47,8 @@ export interface AdsProvider {
 
   /** Создаёт кампанию с группами, фразами и объявлениями. Объявления остаются черновиками. */
   createCampaign(plan: CampaignPlan): Promise<CreateResult>;
+  /** Загружает изображение на площадку; возвращает идентификатор, который указывается в объявлении. */
+  uploadImage(name: string, data: Buffer): Promise<string>;
   /** Добавляет текстовые объявления в существующую группу; возвращает их идентификаторы. */
   addAds(groupId: string, ads: PlanAd[]): Promise<string[]>;
   /** Отправляет объявления на модерацию — после неё начинаются показы и расход. */

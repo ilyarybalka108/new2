@@ -8,7 +8,7 @@ const Body = z.object({
   groupId: z.string().min(1),
   controlAdId: z.string().min(1),
   hypothesis: z.string().min(1).max(1000),
-  ad: z.object({ title: z.string().max(200), title2: z.string().max(200).optional(), text: z.string().max(500), href: z.string().max(1024) }),
+  ad: z.object({ title: z.string().max(200), title2: z.string().max(200).optional(), text: z.string().max(500), href: z.string().max(1024), imageHash: z.string().max(100).optional() }),
 });
 
 export async function POST(request: Request) {

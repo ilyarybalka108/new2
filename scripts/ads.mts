@@ -12,10 +12,14 @@
 //   npm run ads -- daily [--dry-run]        ежедневный обход: изменения в рамках разрешений и отчёт
 //   npm run ads -- history                  журнал изменений с причинами и итогами
 //   npm run ads -- tests                    тесты объявлений
+//   npm run ads -- creative '{"accountId":"…","note":"гипотеза","spec":{"headline":"…","brand":"…","color":"#1c5cab","style":"solid"}}'
+//   npm run ads -- creatives                статичные креативы в библиотеке
+//   npm run ads -- creative-upload <id> <формат>   загрузить картинку на площадку, получить imageHash для объявления
 //   npm run ads -- test-ad '{"accountId":"…","campaignId":"…","groupId":"…","controlAdId":"…","hypothesis":"…","ad":{…}}'
 
 import { readFile } from "node:fs/promises";
 import { changeHistory, runDaily, startAdTest, type StartTestInput } from "../src/lib/ads/autopilot.ts";
+import { createCreative, type CreateCreativeInput, listCreatives, uploadCreative } from "../src/lib/ads/creative-library.ts";
 import { validatePlan } from "../src/lib/ads/plan.ts";
 import { read } from "../src/lib/ads/store.ts";
 import {
@@ -115,11 +119,20 @@ async function main() {
     case "tests":
       return print((await read(config.dataDir)).tests);
 
+    case "creative":
+      return print(await createCreative(JSON.parse(need(args[0], "описание креатива в формате JSON")) as CreateCreativeInput, config));
+
+    case "creatives":
+      return print(await listCreatives(config));
+
+    case "creative-upload":
+      return print({ imageHash: await uploadCreative(need(args[0], "идентификатор креатива"), need(args[1], "формат"), config) });
+
     case "test-ad":
       return print(await startAdTest(JSON.parse(need(args[0], "параметры теста в формате JSON")) as StartTestInput, config, "agent"));
 
     default:
-      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate, daily, history, tests, test-ad");
+      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate, daily, history, tests, test-ad, creative, creatives, creative-upload");
   }
 }
 

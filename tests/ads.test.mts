@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { changeHistory, computePacing, DEFAULT_POLICY, judge, permissionFor, runDaily, startAdTest, zScore } from "../src/lib/ads/autopilot.ts";
 import { loadConfig } from "../src/lib/ads/config.ts";
+import { createCreative, listCreatives, readCreativeFile, uploadCreative } from "../src/lib/ads/creative-library.ts";
+import { fitText, FORMATS, pngSize, readableOn, renderCreative, shade, textWidth } from "../src/lib/ads/creatives.ts";
 import { isCoveredByNegatives } from "../src/lib/ads/insights.ts";
 import { change, derive, eachDay, periods, sumRange } from "../src/lib/ads/metrics.ts";
 import { countedWords, validatePlan } from "../src/lib/ads/plan.ts";
@@ -787,4 +789,78 @@ test("тест объявления: запуск, один тест на гру
   const finalAds = (await getCampaignDetail("demo-shop", "c201", 7, ["ads"], DEMO, "2026-12-01")).breakdowns.ads;
   assert.equal(finalAds.find((a) => a.key === control.key)?.state, "paused");
   assert.equal(finalAds.find((a) => a.key === started.variantAdId)?.state, "active");
+});
+
+// --- креативы -----------------------------------------------------------------------
+
+const SPEC = { headline: "Имплантация зубов под ключ", subline: "Гарантия 5 лет, рассрочка 0%", cta: "Записаться", badge: "от 25 000 ₽", brand: "Улыбка", color: "#1c5cab", style: "solid" } as const;
+
+test("fitText: кегль уменьшается, пока текст не уместится; строки выравниваются", () => {
+  const short = fitText("Скидка 20%", 1000, 2, 100, 40);
+  assert.deepEqual(short, { size: 100, lines: ["Скидка 20%"] });
+
+  const long = fitText("Газовые котлы со склада в Москве с доставкой за один день", 600, 3, 100, 20);
+  assert.ok(long.size < 100 && long.size >= 20);
+  assert.ok(long.lines.length <= 3);
+  assert.equal(long.lines.join(" "), "Газовые котлы со склада в Москве с доставкой за один день");
+  for (const line of long.lines) assert.ok(textWidth(line) * long.size <= 600, line);
+  // Ни одной «висящей» строки из одного короткого слова.
+  assert.ok(long.lines.every((l) => l.length > 3));
+});
+
+test("shade и readableOn: оттенки и читаемый цвет текста", () => {
+  assert.equal(shade("#808080", -1), "#000000");
+  assert.equal(shade("#808080", 1), "#ffffff");
+  assert.equal(readableOn("#1c5cab"), "#ffffff");
+  assert.equal(readableOn("#ffd84d"), "#0b0b0b");
+  assert.throws(() => shade("синий", 0.1), /#RRGGBB/);
+});
+
+test("renderCreative: PNG точного размера в каждом формате, графические — не тяжелее 512 КБ", async () => {
+  for (const format of FORMATS) {
+    const png = await renderCreative(SPEC, format);
+    assert.deepEqual([...png.subarray(1, 4)], [0x50, 0x4e, 0x47], "сигнатура PNG");
+    assert.deepEqual(pngSize(png), { width: format.width, height: format.height }, format.key);
+    if (format.use === "image_ad") assert.ok(png.length <= 512 * 1024, `${format.key}: ${png.length} байт`);
+  }
+  await assert.rejects(renderCreative({ ...SPEC, headline: " " }, FORMATS[0]), /заголовок/);
+});
+
+test("библиотека креативов: создание, чтение файла, загрузка на площадку один раз", async () => {
+  reset();
+  const created = await createCreative({ accountId: "demo-clinic", spec: SPEC, formats: ["square", "300x250"], note: "Цена в плашке поднимет CTR" }, DEMO);
+  assert.deepEqual(created.formats, ["square", "300x250"]);
+  assert.ok(created.bytes.square > 1000);
+  assert.equal((await listCreatives(DEMO))[0].id, created.id);
+  assert.deepEqual(pngSize(await readCreativeFile(created.id, "square", DEMO)), { width: 1080, height: 1080 });
+  await assert.rejects(readCreativeFile(created.id, "wide", DEMO), (e: unknown) => e instanceof ActionError && e.status === 404);
+  await assert.rejects(createCreative({ accountId: "demo-clinic", spec: SPEC, formats: ["999x1"] }, DEMO), /Неизвестный формат/);
+
+  const hash = await uploadCreative(created.id, "square", DEMO);
+  assert.match(hash, /^demo-/);
+  // Повторная загрузка того же формата не создаёт второе изображение и не пишет в журнал.
+  assert.equal(await uploadCreative(created.id, "square", DEMO), hash);
+  const history = await changeHistory(DEMO);
+  assert.equal(history.length, 1);
+  assert.match(history[0].description, /Загружено изображение/);
+  assert.equal(history[0].reason, "Цена в плашке поднимет CTR");
+  assert.equal((await listCreatives(DEMO, "demo-clinic"))[0].uploads.square, hash);
+  assert.deepEqual(await listCreatives(DEMO, "demo-shop"), []);
+});
+
+test("Директ: загрузка изображения и объявление с картинкой", async () => {
+  const api = fakeApi({
+    "adimages.add": ok({ AddResults: [{ AdImageHash: "abc123" }] }),
+    "ads.add": ok({ AddResults: [{ Id: 77 }] }),
+  });
+  const provider = createYandexDirectProvider({ token: "T", login: "c", fetchImpl: api.impl });
+  const hash = await provider.uploadImage("Баннер square", Buffer.from("png-bytes"));
+  assert.equal(hash, "abc123");
+  assert.deepEqual(api.of("adimages.add")[0].body.params, { AdImages: [{ ImageData: Buffer.from("png-bytes").toString("base64"), Name: "Баннер square" }] });
+
+  const ids = await provider.addAds("600", [{ title: "Заголовок", text: "Текст объявления.", href: "https://example.com", imageHash: hash }]);
+  assert.deepEqual(ids, ["77"]);
+  assert.deepEqual(api.of("ads.add")[0].body.params, {
+    Ads: [{ AdGroupId: 600, TextAd: { Title: "Заголовок", Text: "Текст объявления.", Href: "https://example.com", Mobile: "NO", AdImageHash: "abc123" } }],
+  });
 });
