@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { fmtDateTime } from "@/lib/ads/format";
-import type { CreativeRecord, CreativeSpec } from "@/lib/ads/types";
+import type { CreativeRecord, CreativeSpec, MediaRecord } from "@/lib/ads/types";
 import { Notice, useData } from "./shared";
 
 interface FormatInfo {
@@ -23,6 +23,58 @@ interface AccountsResponse {
   mode: "demo" | "live";
   writeEnabled: boolean;
   accounts: { id: string; name: string }[];
+}
+
+interface MediaResponse {
+  enabled: boolean;
+  dailyLimitUsd: number;
+  spentTodayUsd: number;
+  media: MediaRecord[];
+}
+
+const usd = (value: number) => `$${value.toFixed(value < 1 ? 3 : 2)}`;
+
+/** Сгенерированные изображения и ролики с ценой каждого. */
+function MediaGallery({ data }: { data: MediaResponse }) {
+  return (
+    <section className="mt-8">
+      <h2 className="text-base font-semibold">Сгенерированные изображения и ролики{data.media.length ? ` · ${data.media.length}` : ""}</h2>
+      <p className="mt-1 text-sm text-ink-2">
+        {data.enabled
+          ? `Генерация через Higgsfield. Сегодня потрачено ${usd(data.spentTodayUsd)} из дневного лимита ${usd(data.dailyLimitUsd)}.`
+          : "Генерация не подключена: не задан ключ Higgsfield."}
+      </p>
+      {data.media.length === 0 ? (
+        <p className="mt-2 text-sm text-ink-2">Пока ничего не сгенерировано.</p>
+      ) : (
+        <ul className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {data.media.map((m) => (
+            <li key={m.id} className="min-w-0 rounded-xl border border-line bg-surface p-3 text-sm">
+              {m.status !== "ready" ? (
+                <div className="flex aspect-video items-center justify-center rounded-md bg-surface-2 p-3 text-center text-ink-2">
+                  Сгенерировано и оплачено, файл ещё не скачан
+                </div>
+              ) : m.kind === "video" ? (
+                <video src={`/api/ads/media/file?id=${m.id}`} controls preload="metadata" className="aspect-video w-full rounded-md bg-black" />
+              ) : (
+                // Превью отдаёт собственный маршрут кабинета, оптимизация картинок Next здесь не нужна.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={`/api/ads/media/file?id=${m.id}`} alt={m.prompt} loading="lazy" className="aspect-video w-full rounded-md object-cover" />
+              )}
+              <div className="mt-2 font-medium">
+                {m.kind === "video" ? "Ролик" : "Изображение"} · {m.costUsd === null ? "стоимость не названа" : usd(m.costUsd)}
+                {m.uploads ? " · на площадке" : ""}
+              </div>
+              <div className="text-ink-2">
+                {m.accountName} · {fmtDateTime(m.createdAt)}
+              </div>
+              <p className="mt-1 break-words text-xs text-muted">{m.note ?? m.prompt}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 const field = "mt-1 block w-full rounded-lg border border-line bg-page px-3 py-2 text-base";
@@ -105,6 +157,7 @@ export default function Creatives() {
   const [reload, setReload] = useState(0);
   const { data, error } = useData<Library>("/api/ads/creatives", reload);
   const { data: accounts } = useData<AccountsResponse>("/api/ads/accounts", 0);
+  const { data: media } = useData<MediaResponse>("/api/ads/media", reload);
 
   const [accountId, setAccountId] = useState("");
   const [headline, setHeadline] = useState("");
@@ -239,6 +292,8 @@ export default function Creatives() {
           />
         ))}
       </ul>
+
+      {media && <MediaGallery data={media} />}
     </main>
   );
 }

@@ -15,11 +15,28 @@
 //   npm run ads -- creative '{"accountId":"…","note":"гипотеза","spec":{"headline":"…","brand":"…","color":"#1c5cab","style":"solid"}}'
 //   npm run ads -- creatives                статичные креативы в библиотеке
 //   npm run ads -- creative-upload <id> <формат>   загрузить картинку на площадку, получить imageHash для объявления
+//   npm run ads -- estimate image|video     стоимость генерации без запуска
+//   npm run ads -- image '{"accountId":"…","prompt":"…","aspectRatio":"16:9","note":"зачем"}'
+//   npm run ads -- video '{"accountId":"…","creativeId":"…","format":"wide","prompt":"…","duration":5}'
+//   npm run ads -- media                    сгенерированные изображения и ролики
+//   npm run ads -- media-fetch <id>         скачать оплаченный результат, если не удалось сразу
+//   npm run ads -- video-upload <id>        загрузить ролик на площадку, получить videoCreativeId для объявления
 //   npm run ads -- test-ad '{"accountId":"…","campaignId":"…","groupId":"…","controlAdId":"…","hypothesis":"…","ad":{…}}'
 
 import { readFile } from "node:fs/promises";
 import { changeHistory, runDaily, startAdTest, type StartTestInput } from "../src/lib/ads/autopilot.ts";
 import { createCreative, type CreateCreativeInput, listCreatives, uploadCreative } from "../src/lib/ads/creative-library.ts";
+import {
+  estimateGeneration,
+  fetchMedia,
+  generateImage,
+  type GenerateImageInput,
+  generateVideo,
+  type GenerateVideoInput,
+  listMedia,
+  mediaPath,
+  uploadVideoToPlatform,
+} from "../src/lib/ads/media-library.ts";
 import { validatePlan } from "../src/lib/ads/plan.ts";
 import { read } from "../src/lib/ads/store.ts";
 import {
@@ -128,11 +145,38 @@ async function main() {
     case "creative-upload":
       return print({ imageHash: await uploadCreative(need(args[0], "идентификатор креатива"), need(args[1], "формат"), config) });
 
+    case "estimate": {
+      const kind = need(args[0], "image или video");
+      if (kind !== "image" && kind !== "video") throw new Error("estimate: image или video");
+      return print(await estimateGeneration(kind, config));
+    }
+
+    case "image": {
+      const media = await generateImage(JSON.parse(need(args[0], "параметры изображения в формате JSON")) as GenerateImageInput, config);
+      return print({ ...media, path: mediaPath(config, media.file) });
+    }
+
+    case "video": {
+      const media = await generateVideo(JSON.parse(need(args[0], "параметры ролика в формате JSON")) as GenerateVideoInput, config);
+      return print({ ...media, path: mediaPath(config, media.file) });
+    }
+
+    case "media":
+      return print(await listMedia(config));
+
+    case "media-fetch": {
+      const media = await fetchMedia(need(args[0], "идентификатор"), config);
+      return print({ ...media, path: mediaPath(config, media.file) });
+    }
+
+    case "video-upload":
+      return print({ videoCreativeId: await uploadVideoToPlatform(need(args[0], "идентификатор ролика"), config) });
+
     case "test-ad":
       return print(await startAdTest(JSON.parse(need(args[0], "параметры теста в формате JSON")) as StartTestInput, config, "agent"));
 
     default:
-      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate, daily, history, tests, test-ad, creative, creatives, creative-upload");
+      throw new Error("Команды: accounts, overview, audit, campaign, apply, settings, create, moderate, daily, history, tests, test-ad, creative, creatives, creative-upload, estimate, image, video, media, media-fetch, video-upload");
   }
 }
 

@@ -49,6 +49,8 @@ export interface AdsProvider {
   createCampaign(plan: CampaignPlan): Promise<CreateResult>;
   /** Загружает изображение на площадку; возвращает идентификатор, который указывается в объявлении. */
   uploadImage(name: string, data: Buffer): Promise<string>;
+  /** Загружает ролик на площадку и создаёт из него видеодополнение для объявлений. */
+  uploadVideo(name: string, data: Buffer): Promise<{ videoId: string; creativeId: string }>;
   /** Добавляет текстовые объявления в существующую группу; возвращает их идентификаторы. */
   addAds(groupId: string, ads: PlanAd[]): Promise<string[]>;
   /** Отправляет объявления на модерацию — после неё начинаются показы и расход. */

@@ -306,6 +306,37 @@ export interface PlanAd {
   href: string;
   /** Изображение объявления: идентификатор, полученный при загрузке картинки на площадку. */
   imageHash?: string;
+  /** Видеодополнение: идентификатор креатива, полученный при загрузке ролика на площадку. */
+  videoCreativeId?: string;
+}
+
+/** Сгенерированный файл: фоновое изображение или ролик. */
+export interface MediaRecord {
+  id: string;
+  createdAt: string;
+  /** Дата по Москве, YYYY-MM-DD: по ней считается дневной лимит расходов на генерацию. */
+  date: string;
+  accountId: string;
+  accountName: string;
+  kind: "image" | "video";
+  /** Адрес модели в API генератора. */
+  model: string;
+  prompt: string;
+  /** Оценка стоимости в долларах на момент запуска; null — API не назвал сумму. */
+  costUsd: number | null;
+  requestId: string;
+  /** Ссылка на результат у генератора; нужна, если файл не удалось скачать сразу. */
+  url: string;
+  /** ready — файл лежит в библиотеке; pending — оплачен и готов, но ещё не скачан. */
+  status: "ready" | "pending";
+  /** Имя файла в каталоге библиотеки. */
+  file: string;
+  bytes: number;
+  /** Креатив, из которого взят первый кадр ролика. */
+  sourceCreativeId?: string;
+  note?: string;
+  /** Идентификаторы на рекламной площадке после загрузки ролика. */
+  uploads?: { videoId: string; creativeId: string };
 }
 
 // --- креативы ---------------------------------------------------------------------

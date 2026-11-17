@@ -565,6 +565,11 @@ export function createDemoProvider(accountId: string, today: string = todayMosco
       return `demo-${hash(`${name}:${data.length}`).toString(36)}`;
     },
 
+    async uploadVideo(name, data) {
+      const id = hash(`${name}:${data.length}`).toString(36);
+      return { videoId: `demo-video-${id}`, creativeId: `demo-creative-${id}` };
+    },
+
     async addAds(groupId, ads) {
       const campaign = campaigns().find((c) => groupId.startsWith(`${c.id}g`));
       const index = campaign ? Number(groupId.slice(campaign.id.length + 1)) : NaN;

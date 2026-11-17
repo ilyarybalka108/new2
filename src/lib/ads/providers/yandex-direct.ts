@@ -205,6 +205,7 @@ function textAd(ad: PlanAd) {
     Href: ad.href,
     Mobile: "NO",
     ...(ad.imageHash ? { AdImageHash: ad.imageHash } : {}),
+    ...(ad.videoCreativeId ? { VideoExtension: { CreativeId: Number(ad.videoCreativeId) } } : {}),
   };
 }
 
@@ -724,6 +725,23 @@ export function createYandexDirectProvider(opts: DirectOptions): AdsProvider {
       const hash = result.AddResults?.[0]?.AdImageHash;
       if (!hash) throw new DirectApiError("API не вернул идентификатор изображения");
       return hash;
+    },
+
+    async uploadVideo(name, data) {
+      const added = await call<{ AddResults?: (Omit<ActionResult, "Id"> & { Id?: string })[] }>("advideos", "add", {
+        AdVideos: [{ VideoData: data.toString("base64"), Name: name.slice(0, 255) }],
+      });
+      assertOk(added.AddResults as ActionResult[] | undefined, "Видео не загружено");
+      const videoId = added.AddResults?.[0]?.Id;
+      if (!videoId) throw new DirectApiError("API не вернул идентификатор видео");
+      // Из загруженного видео создаётся креатив-видеодополнение — именно он привязывается к объявлению.
+      const creative = await call<{ AddResults?: ActionResult[] }>("creatives", "add", {
+        Creatives: [{ VideoExtensionCreative: { VideoId: String(videoId) } }],
+      });
+      assertOk(creative.AddResults, "Видеодополнение не создано");
+      const creativeId = creative.AddResults?.[0]?.Id;
+      if (!creativeId) throw new DirectApiError("API не вернул идентификатор видеодополнения");
+      return { videoId: String(videoId), creativeId: String(creativeId) };
     },
 
     async addAds(groupId, ads) {

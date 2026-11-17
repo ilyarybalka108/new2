@@ -7,7 +7,9 @@ import { changeHistory, computePacing, DEFAULT_POLICY, judge, permissionFor, run
 import { loadConfig } from "../src/lib/ads/config.ts";
 import { createCreative, listCreatives, readCreativeFile, uploadCreative } from "../src/lib/ads/creative-library.ts";
 import { fitText, FORMATS, pngSize, readableOn, renderCreative, shade, textWidth } from "../src/lib/ads/creatives.ts";
+import { createHiggsfield, HiggsfieldError, MODELS, parseEstimate } from "../src/lib/ads/higgsfield.ts";
 import { isCoveredByNegatives } from "../src/lib/ads/insights.ts";
+import { fetchMedia, generateImage, generateVideo, listMedia, readMediaFile, spentToday, uploadVideoToPlatform } from "../src/lib/ads/media-library.ts";
 import { change, derive, eachDay, periods, sumRange } from "../src/lib/ads/metrics.ts";
 import { countedWords, validatePlan } from "../src/lib/ads/plan.ts";
 import { distribute, resetDemoState } from "../src/lib/ads/providers/demo.ts";
@@ -863,4 +865,170 @@ test("Директ: загрузка изображения и объявлен�
   assert.deepEqual(api.of("ads.add")[0].body.params, {
     Ads: [{ AdGroupId: 600, TextAd: { Title: "Заголовок", Text: "Текст объявления.", Href: "https://example.com", Mobile: "NO", AdImageHash: "abc123" } }],
   });
+});
+
+// --- генерация через Higgsfield --------------------------------------------------------
+
+test("parseEstimate: сумма, тариф за секунду и неизвестная стоимость", () => {
+  assert.deepEqual(parseEstimate({ type: "estimate", credits: "1.5", usd: "0.094" }), { usd: 0.094 });
+  const perSecond = parseEstimate({ type: "description", pricing_description: "Standard self-serve rates in USD per video second: 720p: $0.0315. Total price = selected rate × output duration in seconds." }, 5);
+  assert.equal(perSecond.usd, 0.1575);
+  // Несколько тарифов — берётся наибольший, чтобы не занизить оценку.
+  assert.equal(parseEstimate({ pricing_description: "USD per video second: 720p: $0.03, 1080p: $0.05." }, 10).usd, 0.5);
+  assert.equal(parseEstimate({ pricing_description: "Contact sales" }, 5).usd, null);
+  assert.equal(parseEstimate({ pricing_description: "per video second: $0.03" }).usd, null);
+});
+
+test("клиент Higgsfield: заголовок авторизации, идемпотентность, опрос, загрузка без ключа в хранилище", async () => {
+  const calls: { url: string; method: string; headers: Record<string, string>; body?: unknown }[] = [];
+  let polls = 0;
+  const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    calls.push({ url: u, method: init?.method ?? "GET", headers: init?.headers as Record<string, string>, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+    if (u.endsWith("/estimate/higgsfield-ai/soul/standard")) return Response.json({ type: "estimate", usd: "0.094" });
+    if (u.endsWith("/higgsfield-ai/soul/standard")) return Response.json({ status: "queued", request_id: "req-1" });
+    if (u.endsWith("/requests/req-1/status")) {
+      polls += 1;
+      return Response.json(polls < 3 ? { status: polls === 1 ? "queued" : "in_progress", request_id: "req-1" } : { status: "completed", request_id: "req-1", images: [{ url: "https://cdn.test/a.jpg" }] });
+    }
+    if (u.endsWith("/files/generate-upload-url")) return Response.json({ public_url: "https://cdn.test/in.png", upload_url: "https://storage.test/put", upload_headers: { "Content-Type": "image/png", "x-amz-tagging": "retention=temporary" } });
+    if (u === "https://storage.test/put") return new Response(null, { status: 200 });
+    if (u === "https://cdn.test/a.jpg") return new Response(new Uint8Array([1, 2, 3]));
+    if (u.endsWith("/requests/bad/status")) return Response.json({ status: "nsfw", request_id: "bad" });
+    return Response.json({ detail: "Invalid credentials" }, { status: 401 });
+  }) as typeof fetch;
+  const waits: number[] = [];
+  const hf = createHiggsfield({ key: "id:secret", fetchImpl: impl, sleep: async (ms) => void waits.push(ms) });
+
+  assert.deepEqual(await hf.estimate(MODELS.image, { prompt: "x" }), { usd: 0.094 });
+  const requestId = await hf.submit(MODELS.image, { prompt: "x" });
+  const submit = calls.find((c) => c.url === "https://api.higgsfield.ai/higgsfield-ai/soul/standard")!;
+  assert.equal(submit.headers.Authorization, "Key id:secret");
+  assert.match(submit.headers["Idempotency-Key"], /^[0-9a-f-]{36}$/);
+
+  assert.deepEqual(await hf.wait(requestId), { requestId: "req-1", urls: ["https://cdn.test/a.jpg"] });
+  assert.deepEqual(waits, [2000, 2800]);
+  await assert.rejects(hf.wait("bad"), /отклонена модерацией.*списание не производится/);
+
+  assert.equal(await hf.upload(Buffer.from("png"), "image/png"), "https://cdn.test/in.png");
+  const put = calls.find((c) => c.url === "https://storage.test/put")!;
+  assert.equal(put.method, "PUT");
+  assert.equal("Authorization" in put.headers, false);
+  assert.equal(put.headers["x-amz-tagging"], "retention=temporary");
+
+  assert.deepEqual([...(await hf.download("https://cdn.test/a.jpg"))], [1, 2, 3]);
+  await assert.rejects(hf.submit("/unknown/model", {}), (e: unknown) => e instanceof HiggsfieldError && e.status === 401 && /ключ не принят/.test(e.message));
+});
+
+/** Подменный генератор: считает запуски и отдаёт заданную стоимость. */
+function fakeHiggsfield(opts: { usd?: number | null; failDownload?: boolean; outcome?: "ok" | "failed" } = {}) {
+  const state = { submits: 0, uploads: 0, failDownload: Boolean(opts.failDownload) };
+  const factory = () =>
+    ({
+      estimate: async () => ({ usd: opts.usd === undefined ? 0.1 : opts.usd }),
+      submit: async () => `req-${++state.submits}`,
+      wait: async (requestId: string) => {
+        if (opts.outcome === "failed") throw new HiggsfieldError("Генерация не выполнена: failed (списание не производится)");
+        return { requestId, urls: [`https://cdn.test/${requestId}.bin`] };
+      },
+      upload: async () => `https://cdn.test/frame-${++state.uploads}.png`,
+      download: async () => {
+        if (state.failDownload) throw new HiggsfieldError("Не удалось скачать результат: HTTP 403", 403);
+        return Buffer.from("media-bytes");
+      },
+    }) as never;
+  return { state, factory };
+}
+
+const WITH_KEY = loadConfig({ ADS_DATA_DIR: "memory", HF_API_KEY: "id:secret", HF_DAILY_LIMIT_USD: "0.25" });
+
+test("генерация: без ключа недоступна, изображение сохраняется со стоимостью и попадает в журнал", async () => {
+  reset();
+  await assert.rejects(generateImage({ accountId: "demo-clinic", prompt: "Клиника" }, DEMO), /не задан ключ Higgsfield/);
+
+  const hf = fakeHiggsfield();
+  const image = await generateImage({ accountId: "demo-clinic", prompt: "Светлый кабинет стоматолога", aspectRatio: "16:9", note: "Фон для баннера" }, WITH_KEY, "agent", hf.factory);
+  assert.deepEqual(
+    { kind: image.kind, status: image.status, costUsd: image.costUsd, bytes: image.bytes, model: image.model },
+    { kind: "image", status: "ready", costUsd: 0.1, bytes: 11, model: "/higgsfield-ai/soul/standard" },
+  );
+  assert.equal((await readMediaFile(image.id, WITH_KEY)).data.toString(), "media-bytes");
+  const log = await changeHistory(WITH_KEY);
+  assert.equal(log[0].description, "Сгенерировано изображение ($0.1)");
+  assert.equal(log[0].reason, "Фон для баннера");
+  assert.equal(await spentToday(WITH_KEY), 0.1);
+});
+
+test("генерация: дневной лимит расходов и запуск без названной стоимости", async () => {
+  reset();
+  const hf = fakeHiggsfield({ usd: 0.1 });
+  const make = () => generateImage({ accountId: "demo-clinic", prompt: "Фон" }, WITH_KEY, "agent", hf.factory);
+  await make();
+  await make();
+  // Третья генерация превысила бы лимит 0,25: запрос на генерацию даже не отправляется.
+  await assert.rejects(make(), /доступно \$0\.05.*дневного лимита \$0\.25/);
+  assert.equal(hf.state.submits, 2);
+  // Явный разовый потолок позволяет выйти за дневной лимит осознанно.
+  await generateImage({ accountId: "demo-clinic", prompt: "Фон", maxUsd: 0.2 }, WITH_KEY, "agent", hf.factory);
+  assert.equal(hf.state.submits, 3);
+
+  reset();
+  const unknown = fakeHiggsfield({ usd: null });
+  await assert.rejects(generateImage({ accountId: "demo-clinic", prompt: "Фон" }, WITH_KEY, "agent", unknown.factory), /не назвал точную стоимость/);
+  assert.equal(unknown.state.submits, 0);
+});
+
+test("генерация: неудача не съедает лимит, а сбой скачивания не теряет оплаченный результат", async () => {
+  reset();
+  const failed = fakeHiggsfield({ outcome: "failed" });
+  await assert.rejects(generateImage({ accountId: "demo-clinic", prompt: "Фон" }, WITH_KEY, "agent", failed.factory), /списание не производится/);
+  assert.deepEqual(await listMedia(WITH_KEY), []);
+  assert.equal(await spentToday(WITH_KEY), 0);
+
+  const flaky = fakeHiggsfield({ failDownload: true });
+  await assert.rejects(generateImage({ accountId: "demo-clinic", prompt: "Фон" }, WITH_KEY, "agent", flaky.factory), /готов и оплачен.*media-fetch/);
+  const [pending] = await listMedia(WITH_KEY);
+  assert.deepEqual({ status: pending.status, url: pending.url }, { status: "pending", url: "https://cdn.test/req-1.bin" });
+  await assert.rejects(readMediaFile(pending.id, WITH_KEY), (e: unknown) => e instanceof ActionError && e.status === 409);
+
+  // Повторная попытка только скачивает: новая генерация не запускается и не оплачивается.
+  flaky.state.failDownload = false;
+  const fetched = await fetchMedia(pending.id, WITH_KEY, flaky.factory);
+  assert.equal(fetched.status, "ready");
+  assert.equal(flaky.state.submits, 1);
+});
+
+test("ролик из креатива: первый кадр загружается генератору, ролик уходит на площадку как видеодополнение", async () => {
+  reset();
+  const creative = await createCreative({ accountId: "demo-clinic", spec: SPEC, formats: ["wide"] }, WITH_KEY);
+  const hf = fakeHiggsfield({ usd: 0.16 });
+
+  await assert.rejects(generateVideo({ accountId: "demo-clinic", prompt: "Наезд камеры" }, WITH_KEY, "agent", hf.factory), /первый кадр/);
+  const video = await generateVideo({ accountId: "demo-clinic", prompt: "Медленный наезд камеры", creativeId: creative.id, format: "wide" }, WITH_KEY, "agent", hf.factory);
+  assert.deepEqual(
+    { kind: video.kind, status: video.status, costUsd: video.costUsd, source: video.sourceCreativeId, file: video.file.endsWith(".mp4") },
+    { kind: "video", status: "ready", costUsd: 0.16, source: creative.id, file: true },
+  );
+  assert.equal(hf.state.uploads, 1);
+
+  const creativeId = await uploadVideoToPlatform(video.id, WITH_KEY);
+  assert.match(creativeId, /^demo-creative-/);
+  assert.equal(await uploadVideoToPlatform(video.id, WITH_KEY), creativeId);
+  assert.equal((await listMedia(WITH_KEY))[0].uploads?.creativeId, creativeId);
+});
+
+test("Директ: загрузка ролика, создание видеодополнения и объявление с ним", async () => {
+  const api = fakeApi({
+    "advideos.add": ok({ AddResults: [{ Id: "vid-1" }] }),
+    "creatives.add": ok({ AddResults: [{ Id: 555 }] }),
+    "ads.add": ok({ AddResults: [{ Id: 78 }] }),
+  });
+  const provider = createYandexDirectProvider({ token: "T", login: "c", fetchImpl: api.impl });
+  assert.deepEqual(await provider.uploadVideo("Ролик", Buffer.from("mp4")), { videoId: "vid-1", creativeId: "555" });
+  assert.deepEqual(api.of("advideos.add")[0].body.params, { AdVideos: [{ VideoData: Buffer.from("mp4").toString("base64"), Name: "Ролик" }] });
+  assert.deepEqual(api.of("creatives.add")[0].body.params, { Creatives: [{ VideoExtensionCreative: { VideoId: "vid-1" } }] });
+
+  await provider.addAds("600", [{ title: "Заголовок", text: "Текст.", href: "https://example.com", videoCreativeId: "555" }]);
+  const ad = (api.of("ads.add")[0].body.params.Ads as { TextAd: Record<string, unknown> }[])[0].TextAd;
+  assert.deepEqual(ad.VideoExtension, { CreativeId: 555 });
 });
