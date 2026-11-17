@@ -1,42 +1,90 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0b0b0f;
-  --panel: #14141b;
-  --panel-2: #1c1c25;
-  --fg: #ececf1;
-  --muted: #9a9aa8;
-  --line: #2a2a36;
-  --accent: #e0b35a;
-  --accent-2: #7bb3ff;
-  --ok: #5ec98a;
-  --warn: #e3a35b;
-  --bad: #e06c75;
+  color-scheme: light;
+  --page: #f6f6f3;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #77756f;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --line: rgba(11, 11, 11, 0.1);
+  --series: #2a78d6;
+  --accent: #1c5cab;
+  --good: #006300;
+  --bad: #b42323;
+  --st-good: #0ca30c;
+  --st-warning: #fab219;
+  --st-serious: #ec835a;
+  --st-critical: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #252523;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #96948d;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --line: rgba(255, 255, 255, 0.1);
+    --series: #3987e5;
+    --accent: #86b6ef;
+    --good: #0ca30c;
+    --bad: #e66767;
+  }
 }
 
 @theme inline {
-  --color-bg: var(--bg);
-  --color-panel: var(--panel);
-  --color-panel-2: var(--panel-2);
-  --color-fg: var(--fg);
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
   --color-muted: var(--muted);
+  --color-grid: var(--grid);
+  --color-axis: var(--axis);
   --color-line: var(--line);
+  --color-series: var(--series);
   --color-accent: var(--accent);
-  --color-accent-2: var(--accent-2);
-  --color-ok: var(--ok);
-  --color-warn: var(--warn);
+  --color-good: var(--good);
   --color-bad: var(--bad);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --color-st-good: var(--st-good);
+  --color-st-warning: var(--st-warning);
+  --color-st-serious: var(--st-serious);
+  --color-st-critical: var(--st-critical);
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 body {
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--page);
+  color: var(--ink);
   font-family: var(--font-sans);
 }
 
-textarea,
-input {
-  color-scheme: dark;
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--series);
+  outline-offset: 2px;
+}
+
+details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
 }

@@ -1,5 +1,5 @@
-import TasteApp from "@/components/TasteApp";
+import Dashboard from "@/components/ads/Dashboard";
 
 export default function Home() {
-  return <TasteApp />;
+  return <Dashboard />;
 }
